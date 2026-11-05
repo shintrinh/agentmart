@@ -109,6 +109,17 @@
   </section>
 
   <section>
+    <h2>Subscriptions — weekly restock box</h2>
+    <p class="muted">Approve once on PayPal sandbox and the box bills every week. The agent sizes each week's box from burn rate and fulfills it — suspend or cancel any time. (Sandbox billing runs on the real weekly cycle, so the second charge is 7 days out, not visible in this demo.)</p>
+    <form id="subForm" class="invoice-form">
+      <input id="subBudget" type="number" min="1" step="1" value="60" aria-label="Weekly box budget in USD" required />
+      <button type="submit">Set up weekly subscription</button>
+    </form>
+    <p id="subMsg" class="checkout-msg"></p>
+    <div id="subsGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+  </section>
+
+  <section>
     <h2>Orders</h2>
     <p class="muted">AG Grid — sort, filter and resize any column. Every row is a real PayPal sandbox order created by the agent or the manual checkout.</p>
     <div id="ordersGrid" class="ag-theme-quartz" style="height: 320px; width: 100%;"></div>

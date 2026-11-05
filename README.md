@@ -98,10 +98,10 @@ server uses as its PayPal return URL.
 6. Open **/dashboard.html**: inventory in AG Grid with low-stock alerts,
    supplier prices with creep alerts and best-buy column, spend stats;
    orders listed with expected delivery dates; payables show what is owed
-   per supplier ($32 to Highland Roasters, Net 7, due 2026-11-17; $24 to
-   Brew Gear Co., Net 30, due 2026-12-10) — mark one as paid; pick a
-   completed order id, enter any email, and create (then send) a draft
-   PayPal invoice — then refresh its live status from PayPal.
+   per supplier for the captured order(s) — amount, terms, due date —
+   mark one as paid; pick a completed order id, enter any email, and
+   create (then send) a draft PayPal invoice — then refresh its live
+   status from PayPal.
 7. Ask the agent: **“What do I owe suppliers?”** and **“How much have you
    saved me?”** — it answers from the payables ledger and the savings
    record on captured orders.
@@ -117,9 +117,22 @@ server uses as its PayPal return URL.
    restock under $60”**: oat-milk is left out of the order entirely, and
    matcha is capped at its max stock of 3. **Reset demo to seed state**
    restores the starting stock and clears waste and carts.
-7. Local run instead: `npm install && cp .env.example .env` (fill PayPal
-   sandbox credentials as above), `npm start`, then the same steps at
-   <http://localhost:3000>.
+10. Subscriptions: ask the agent **“Set up a weekly restock subscription
+    under $60”** — it sizes this week's box ($56: Matcha ×2 + Oat Milk ×1)
+    and creates a PayPal subscription; approve it on PayPal sandbox and
+    the dashboard subscriptions grid shows ACTIVE with the next billing
+    date 7 days out. Ask **“What subscriptions do I have?”** to list them,
+    and **“Fulfill this week's box”** to run the restock for the active
+    subscription. (Sandbox billing runs on the real weekly cycle, so the
+    second charge is not visible inside the demo.)
+11. Test buyer account (for the approve steps above): no login is needed
+    to browse, chat or run the agent — only the PayPal approval needs a
+    sandbox buyer account. Create one free in ~2 minutes at
+    [developer.paypal.com](https://developer.paypal.com) → Sandbox →
+    Accounts → Create Account (Personal, US). No real money moves.
+12. Local run instead: `npm install && cp .env.example .env` (fill PayPal
+    sandbox credentials as above), `npm start`, then the same steps at
+    <http://localhost:3000>.
 
 Verified sandbox flows (2026-11-05): agent kit $56 (Arabica $18 + Robusta
 $14 + Cold Brew Bottle $24) → PayPal order `19T958561E596930N` → buyer
@@ -131,6 +144,15 @@ saved $2, expected delivery 2026-11-09 → PayPal order `45E60006TY0842152`.
 Smart restock v2 (deterministic + live LLM via Fireworks): Matcha ×2 +
 Oat Milk ×1 = $58 → PayPal orders `9RU98421263954237` (deterministic) and
 `42E68398PS392235D` (live LLM, one `smart_restock` tool call, 2 rounds).
+Weekly subscription v7 (live sandbox 2026-11-05): product
+`PROD-4JN29518CH501440C` → weekly plan `P-52P66499NP903415PNLWDKNA` ($56)
+→ subscription `I-1UGC5UDMPCUT` APPROVAL_PENDING with approve link
+(GET 200). Local server: subscription `I-UH1CS723HVM9` ($56 box, same
+sizing) created via `POST /api/subscriptions`, listed by the agent and
+refreshed live from PayPal; fulfill correctly blocked while pending
+(400 SUBSCRIPTION_NOT_ACTIVE). Approve → ACTIVE → fulfill still to be
+verified on the hosted demo after deploy (needs a buyer-sandbox approval
+click in the browser).
 
 ## Architecture
 
@@ -147,7 +169,9 @@ Express server (server.js)
    ├─ Agent layer: LLM (Muse Spark tool-calling) → tools over cart/order/
    │   inventory state, deterministic intent engine as fallback
    ├─ PayPal Orders API v2 (OAuth client credentials, sandbox by default)
-   └─ PayPal Invoicing API v2 (create/send invoice from an order)
+   ├─ PayPal Invoicing API v2 (create/send invoice from an order)
+   └─ PayPal Subscriptions API (catalog product → weekly billing plan →
+       subscription; approve once, bills weekly; suspend/activate/cancel)
 PayPal sandbox → buyer approval → /paypal/return → capture
 ```
 

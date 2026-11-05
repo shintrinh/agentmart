@@ -113,7 +113,10 @@ CREATE TABLE IF NOT EXISTS inventory (productId TEXT PRIMARY KEY, stock REAL NOT
 CREATE TABLE IF NOT EXISTS price_history (productId TEXT NOT NULL, price REAL NOT NULL, recordedAt TEXT NOT NULL, source TEXT NOT NULL, UNIQUE(productId, recordedAt));
 CREATE TABLE IF NOT EXISTS payables (id TEXT PRIMARY KEY, orderId TEXT NOT NULL, supplier TEXT NOT NULL, amount REAL NOT NULL, dueDate TEXT NOT NULL, terms TEXT NOT NULL, status TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restock_plans (id TEXT PRIMARY KEY, name TEXT NOT NULL, dayOfWeek INTEGER NOT NULL, budget REAL NOT NULL, active INTEGER NOT NULL, lastRunAt TEXT, createdAt TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS waste (id INTEGER PRIMARY KEY AUTOINCREMENT, productId TEXT NOT NULL, qty REAL NOT NULL, cost REAL NOT NULL, wastedAt TEXT NOT NULL);`);
+CREATE TABLE IF NOT EXISTS waste (id INTEGER PRIMARY KEY AUTOINCREMENT, productId TEXT NOT NULL, qty REAL NOT NULL, cost REAL NOT NULL, wastedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS subscription_plans (amount REAL PRIMARY KEY, planId TEXT NOT NULL, productId TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, planId TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, boxItems TEXT NOT NULL, createdAt TEXT NOT NULL, lastFulfilledAt TEXT, nextBillingDate TEXT);`);
 // Orders gained columns in v3/v4; add them to older databases.
 for (const col of ['expectedDelivery TEXT', 'saved REAL', 'preventedStockouts INTEGER']) {
   try { db.exec(`ALTER TABLE orders ADD COLUMN ${col}`); } catch { /* already there */ }
@@ -136,6 +139,19 @@ function saveOrder(id, rec) {
 function saveInvoice(id, rec) {
   db.prepare('INSERT INTO invoices (id, orderId, invoiceId, status, recipient, total, createdAt, invoiceUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, invoiceUrl=excluded.invoiceUrl').run(id, rec.orderId, rec.invoiceId, rec.status, rec.recipient || '', rec.total, rec.createdAt, rec.invoiceUrl || '');
 }
+// Subscriptions (v7): a weekly restock box billed by PayPal Subscriptions.
+// The subscription itself lives on PayPal; we cache its id, plan, amount,
+// status and the box snapshot sized at setup. Render free has no persistent
+// disk, so after a redeploy these rows reset — the subscription on PayPal
+// survives and can be re-fetched by id (see refreshSubscription).
+const subscriptions = new Map(); // paypalSubscriptionId -> { planId, amount, status, boxItems, createdAt, lastFulfilledAt, nextBillingDate }
+const subscriptionPlans = new Map(); // amount -> { planId, productId, createdAt }
+function saveSubscription(id, rec) {
+  db.prepare('INSERT INTO subscriptions (id, planId, amount, status, boxItems, createdAt, lastFulfilledAt, nextBillingDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, lastFulfilledAt=excluded.lastFulfilledAt, nextBillingDate=excluded.nextBillingDate').run(id, rec.planId, rec.amount, rec.status, JSON.stringify(rec.boxItems), rec.createdAt, rec.lastFulfilledAt || null, rec.nextBillingDate || null);
+}
+function subscriptionView(id, rec) {
+  return { id, planId: rec.planId, amount: rec.amount, status: rec.status, box: rec.boxItems, createdAt: rec.createdAt, lastFulfilledAt: rec.lastFulfilledAt || null, nextBillingDate: rec.nextBillingDate || null };
+}
 // Load persisted state on startup so orders/carts survive a restart.
 for (const row of db.prepare('SELECT session, items FROM carts').all()) {
   carts.set(row.session, new Map(JSON.parse(row.items)));
@@ -145,6 +161,12 @@ for (const row of db.prepare('SELECT * FROM orders ORDER BY createdAt DESC').all
 }
 for (const row of db.prepare('SELECT * FROM invoices ORDER BY createdAt DESC').all()) {
   invoices.set(row.id, { orderId: row.orderId, invoiceId: row.invoiceId, status: row.status, recipient: row.recipient, total: row.total, createdAt: row.createdAt, invoiceUrl: row.invoiceUrl });
+}
+for (const row of db.prepare('SELECT * FROM subscription_plans').all()) {
+  subscriptionPlans.set(row.amount, { planId: row.planId, productId: row.productId, createdAt: row.createdAt });
+}
+for (const row of db.prepare('SELECT * FROM subscriptions ORDER BY createdAt DESC').all()) {
+  subscriptions.set(row.id, { planId: row.planId, amount: row.amount, status: row.status, boxItems: JSON.parse(row.boxItems), createdAt: row.createdAt, lastFulfilledAt: row.lastFulfilledAt || null, nextBillingDate: row.nextBillingDate || null });
 }
 // Payables: what the café owes each supplier for captured orders.
 const payables = new Map(); // payableId -> { orderId, supplier, amount, dueDate, terms, status }
@@ -629,6 +651,114 @@ async function getPayPalInvoice(invoiceId) {
   return res.json();
 }
 
+/* ------------------------------------------- PayPal Subscriptions (v7) */
+// Weekly Restock Box: one catalog product, one billing plan per price, one
+// subscription per café. Schema verified live on sandbox 2026-11-05: product
+// is {name, description, type: 'SERVICE'} — a category value is rejected
+// with 400, so none is sent. Plan is weekly, fixed price, infinite cycles.
+async function ensureSubscriptionProduct() {
+  const row = db.prepare('SELECT value FROM meta WHERE key=?').get('paypal_product_id');
+  if (row) return row.value;
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/catalogs/products`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'AgentMart Weekly Restock Box', description: 'Weekly cafe restock box sized by the AgentMart agent', type: 'SERVICE' }),
+  });
+  if (!res.ok) throw new Error(`PayPal create product failed (${res.status}): ${await res.text()}`);
+  const product = await res.json();
+  db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('paypal_product_id', product.id);
+  return product.id;
+}
+
+async function ensureSubscriptionPlan(amount) {
+  const cached = subscriptionPlans.get(amount);
+  if (cached) return cached.planId;
+  const productId = await ensureSubscriptionProduct();
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/billing/plans`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      product_id: productId,
+      name: `Weekly Restock Box - ${money(amount)}`,
+      description: 'Weekly restock box, billed every week',
+      billing_cycles: [{ frequency: { interval_unit: 'WEEK', interval_count: 1 }, tenure_type: 'REGULAR', sequence: 1, total_cycles: 0, pricing_scheme: { fixed_price: { value: amount.toFixed(2), currency_code: 'USD' } } }],
+      payment_preferences: { auto_bill_outstanding: true, setup_fee_failure_action: 'CONTINUE', payment_failure_threshold: 3 },
+    }),
+  });
+  if (!res.ok) throw new Error(`PayPal create plan failed (${res.status}): ${await res.text()}`);
+  const plan = await res.json();
+  const rec = { planId: plan.id, productId, createdAt: new Date().toISOString() };
+  subscriptionPlans.set(amount, rec);
+  db.prepare('INSERT INTO subscription_plans (amount, planId, productId, createdAt) VALUES (?, ?, ?, ?)').run(amount, plan.id, productId, rec.createdAt);
+  return plan.id;
+}
+
+async function createSubscription(amount) {
+  const { plan: box, total } = smartRestockPlan(amount);
+  if (!box.length) throw new Error('NOTHING_TO_RESTOCK');
+  const planId = await ensureSubscriptionPlan(total);
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/billing/subscriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      plan_id: planId,
+      application_context: { brand_name: 'AgentMart', locale: 'en-US', return_url: `${BASE_URL}/subscription/return`, cancel_url: `${BASE_URL}/subscription/cancel`, user_action: 'SUBSCRIBE_NOW' },
+    }),
+  });
+  if (!res.ok) throw new Error(`PayPal create subscription failed (${res.status}): ${await res.text()}`);
+  const sub = await res.json();
+  const approveUrl = (sub.links || []).find((l) => l.rel === 'approve')?.href || '';
+  const rec = { planId, amount: total, status: sub.status || 'APPROVAL_PENDING', boxItems: box, createdAt: new Date().toISOString(), lastFulfilledAt: null, nextBillingDate: null };
+  subscriptions.set(sub.id, rec);
+  saveSubscription(sub.id, rec);
+  return { subscriptionId: sub.id, approveUrl, amount: total, items: box, status: rec.status };
+}
+
+async function refreshSubscription(id) {
+  const rec = subscriptions.get(id);
+  if (!rec) throw new Error('NOT_FOUND');
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/billing/subscriptions/${id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`PayPal get subscription failed (${res.status}): ${await res.text()}`);
+  const sub = await res.json();
+  rec.status = sub.status || rec.status;
+  rec.nextBillingDate = sub.billing_info?.next_billing_time || rec.nextBillingDate;
+  saveSubscription(id, rec);
+  return subscriptionView(id, rec);
+}
+
+async function setSubscriptionStatus(id, action, reason) {
+  const rec = subscriptions.get(id);
+  if (!rec) throw new Error('NOT_FOUND');
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/billing/subscriptions/${id}/${action}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason || `Merchant ${action} from AgentMart dashboard` }),
+  });
+  if (!res.ok) throw new Error(`PayPal ${action} subscription failed (${res.status}): ${await res.text()}`);
+  return refreshSubscription(id);
+}
+
+async function fulfillSubscription(id, session) {
+  const rec = subscriptions.get(id);
+  if (!rec) throw new Error('NOT_FOUND');
+  if (rec.status !== 'ACTIVE') throw new Error('SUBSCRIPTION_NOT_ACTIVE');
+  const { plan, total, saved } = smartRestockPlan(rec.amount);
+  if (!plan.length) return { message: 'Nothing needs restocking this week — all stock is above its reorder point.' };
+  for (const item of plan) cartAdd(session, item.id, item.qty, { price: item.price, supplier: item.supplier, leadTimeDays: item.leadTimeDays });
+  const r = await agentTools.create_checkout(session);
+  const order = orders.get(r.orderId);
+  rec.lastFulfilledAt = new Date().toISOString();
+  saveSubscription(id, rec);
+  return { subscriptionId: id, plan, total, saved, expectedDelivery: order?.expectedDelivery, orderId: r.orderId, checkoutUrl: r.checkoutUrl, reply: r.reply };
+}
+
 /* -------------------------------------------------------------- agent tools */
 function searchProducts(query, maxPrice) {
   const q = (query || '').toLowerCase();
@@ -682,8 +812,12 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'check_payables', description: 'Check what the café owes suppliers: unpaid payables per supplier, amounts, due dates and overdue flags. Use when the user asks what they owe.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'check_savings', description: 'Check how much the agent has saved the café: total dollars saved by buying from cheaper alternate suppliers, stock-outs prevented, and number of captured orders. Use when the user asks how much you have saved them.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_restock_plan', description: 'Run the active weekly restock plan (or the named plan): smart restock within the plan budget and create the PayPal checkout. Use when the user asks to run their weekly restock.', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'create_subscription', description: 'Set up a weekly restock subscription (PayPal Subscriptions): size this week\'s restock box within the budget, create the weekly billing plan and subscription, and return the PayPal approval URL. Use when the user asks to subscribe or set up a weekly restock subscription.', parameters: { type: 'object', properties: { budget: { type: 'number' } } } } },
+  { type: 'function', function: { name: 'check_subscriptions', description: 'List the café\'s weekly restock subscriptions with their PayPal status, amount, box contents and next billing date. Use when the user asks what subscriptions they have.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'cancel_subscription', description: 'Cancel a weekly restock subscription on PayPal (by subscription id, or the latest one if omitted). Use when the user asks to cancel their subscription.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'fulfill_subscription', description: 'Fulfill this week\'s box for an ACTIVE weekly restock subscription: smart restock within the subscription amount and create the PayPal checkout. Use when the user asks to fulfill this week\'s subscription box.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -751,6 +885,23 @@ async function executeLlmTool(session, name, args) {
     const list = [...payables.entries()].map(([id, r]) => ({ id, ...r, overdue: r.status === 'UNPAID' && r.dueDate < today })).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
     const unpaid = list.filter((r) => r.status === 'UNPAID');
     return { payables: list, totalUnpaid: Math.round(unpaid.reduce((s, r) => s + r.amount, 0) * 100) / 100, overdue: unpaid.filter((r) => r.overdue) };
+  }
+  if (name === 'create_subscription') {
+    const budget = typeof args.budget === 'number' && args.budget > 0 ? args.budget : 60;
+    return createSubscription(budget);
+  }
+  if (name === 'check_subscriptions') {
+    return { subscriptions: [...subscriptions.entries()].map(([id, rec]) => subscriptionView(id, rec)) };
+  }
+  if (name === 'cancel_subscription') {
+    const id = args.subscriptionId || [...subscriptions.keys()].pop();
+    if (!id) return { message: 'No subscriptions yet — set one up first, for example "set up a weekly restock subscription under $60".' };
+    return setSubscriptionStatus(id, 'cancel', 'Cancelled by the merchant from AgentMart');
+  }
+  if (name === 'fulfill_subscription') {
+    const id = args.subscriptionId || [...subscriptions.entries()].find(([, r]) => r.status === 'ACTIVE')?.[0];
+    if (!id) return { message: 'No ACTIVE subscription to fulfill — set one up and approve it on PayPal first.' };
+    return fulfillSubscription(id, session);
   }
   return { error: 'UNKNOWN_TOOL' };
 }
@@ -856,6 +1007,40 @@ async function runAgent(session, rawMessage) {
     const s = savingsSummary();
     if (!s.capturedOrders) return { reply: 'No captured orders yet, so no savings recorded. Run a smart restock and approve it — I will track every dollar the cheaper suppliers save you.' };
     return { reply: `Across ${s.capturedOrders} captured order(s), I have saved you ${money(s.totalSaved)} by buying from cheaper alternate suppliers, and prevented ${s.preventedStockouts} stock-out(s) by restocking before items ran out.` };
+  }
+
+  // Subscriptions (v7): "set up a weekly subscription" / "what subscriptions
+  // do I have?" / "cancel my subscription" / "fulfill this week's box".
+  if (/(subscription|subscribe|đăng ký|dang ky)/.test(msg)) {
+    const list = [...subscriptions.entries()].map(([id, rec]) => subscriptionView(id, rec));
+    if (/(cancel|hủy|huy)/.test(msg)) {
+      const idMatch = message.match(/\bI-[A-Z0-9]+\b/);
+      const id = idMatch?.[0] || [...subscriptions.keys()].pop();
+      if (!id) return { reply: 'No subscriptions yet — set one up first, for example "set up a weekly restock subscription under $60".' };
+      const view = await setSubscriptionStatus(id, 'cancel', 'Cancelled by the merchant from AgentMart');
+      return { reply: `Subscription ${id} is now ${view.status} — PayPal will not bill the weekly ${money(view.amount)} anymore.` };
+    }
+    if (/(fulfill|fulfil|giao hàng|giao hang)/.test(msg)) {
+      const id = [...subscriptions.entries()].find(([, r]) => r.status === 'ACTIVE')?.[0];
+      if (!id) return { reply: 'No ACTIVE subscription to fulfill — set one up and approve it on PayPal first.' };
+      const out = await fulfillSubscription(id, session);
+      if (out.message) return { reply: out.message };
+      return { ...out, reply: `This week's box is on its way: ${out.plan.map((i) => `${i.qty}× ${i.name}`).join(', ')} — total ${money(out.total)} (saved ${money(out.saved)}), expected delivery ${out.expectedDelivery}. PayPal order ${out.orderId} — please approve on PayPal sandbox.` };
+    }
+    if (/(what|list|show|have|status|nào|nao)/.test(msg)) {
+      if (!list.length) return { reply: 'No subscriptions yet — set one up with "set up a weekly restock subscription under $60" and PayPal will bill the box weekly after you approve it once.' };
+      const lines = list.map((s) => `${s.id} — ${money(s.amount)}/week, ${s.status}${s.nextBillingDate ? `, next billing ${s.nextBillingDate.slice(0, 10)}` : ''} (box: ${s.box.map((i) => `${i.qty}× ${i.name}`).join(', ')})`).join('\n');
+      return { reply: `Your weekly restock subscriptions:\n${lines}` };
+    }
+    const budgetMatch = msg.match(/\$?\s*(\d+(?:\.\d+)?)/);
+    const budget = budgetMatch ? Number(budgetMatch[1]) : 60;
+    try {
+      const sub = await createSubscription(budget);
+      return { reply: `Weekly restock subscription set up — box: ${sub.items.map((i) => `${i.qty}× ${i.name}`).join(', ')}, ${money(sub.amount)} every week. PayPal subscription ${sub.subscriptionId} is waiting for approval:\n${sub.approveUrl}\nApprove it once on PayPal sandbox and it bills weekly on its own.` };
+    } catch (e) {
+      if (e.message === 'NOTHING_TO_RESTOCK') return { reply: 'Nothing needs restocking right now — all stock is above its reorder point, so there is no box to subscribe to yet.' };
+      throw e;
+    }
   }
 
   // Waste / overstock: "how much am I wasting?" / "am I overstocked?"
@@ -1024,7 +1209,7 @@ async function runAgent(session, rawMessage) {
 
   // Greeting / help
   if (/(hello|hi|hey|help|xin chào|chao)/.test(msg)) {
-    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Checkout"' };
+    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Checkout"' };
   }
 
   // Default: treat as a search
@@ -1085,6 +1270,69 @@ app.delete('/api/plans/:id', (req, res) => {
   plans.delete(req.params.id);
   db.prepare('DELETE FROM restock_plans WHERE id=?').run(req.params.id);
   res.json({ deleted: req.params.id });
+});
+
+// Subscriptions (v7): weekly restock box billed by PayPal Subscriptions.
+app.get('/api/subscriptions', (req, res) => res.json([...subscriptions.entries()].map(([id, rec]) => subscriptionView(id, rec))));
+app.post('/api/subscriptions', async (req, res) => {
+  const b = Number(req.body?.budget);
+  const budget = Number.isFinite(b) && b > 0 ? b : 60;
+  if (req.body?.budget !== undefined && !(Number.isFinite(b) && b > 0)) {
+    return res.status(400).json({ error: 'INVALID_INPUT', message: 'budget must be a number above 0.' });
+  }
+  try {
+    res.status(201).json(await createSubscription(budget));
+  } catch (e) {
+    console.error(e);
+    if (e.message === 'NOTHING_TO_RESTOCK') return res.status(400).json({ error: 'NOTHING_TO_RESTOCK', message: 'Nothing needs restocking right now.' });
+    res.status(502).json({ error: 'SUBSCRIPTION_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/refresh', async (req, res) => {
+  try {
+    res.json(await refreshSubscription(req.params.id));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    console.error(e);
+    res.status(502).json({ error: 'REFRESH_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/cancel', async (req, res) => {
+  try {
+    res.json(await setSubscriptionStatus(req.params.id, 'cancel', 'Cancelled by the merchant from AgentMart'));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    console.error(e);
+    res.status(502).json({ error: 'CANCEL_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/suspend', async (req, res) => {
+  try {
+    res.json(await setSubscriptionStatus(req.params.id, 'suspend', 'Suspended by the merchant from AgentMart'));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    console.error(e);
+    res.status(502).json({ error: 'SUSPEND_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/activate', async (req, res) => {
+  try {
+    res.json(await setSubscriptionStatus(req.params.id, 'activate', 'Reactivated by the merchant from AgentMart'));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    console.error(e);
+    res.status(502).json({ error: 'ACTIVATE_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/fulfill', async (req, res) => {
+  try {
+    res.json(await fulfillSubscription(req.params.id, sessionOf(req)));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    if (e.message === 'SUBSCRIPTION_NOT_ACTIVE') return res.status(400).json({ error: 'SUBSCRIPTION_NOT_ACTIVE', message: 'Only an ACTIVE subscription can be fulfilled.' });
+    console.error(e);
+    res.status(502).json({ error: 'FULFILL_FAILED', message: e.message });
+  }
 });
 app.get('/api/payables', (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
@@ -1253,6 +1501,18 @@ app.get('/paypal/return', async (req, res) => {
   }
 });
 app.get('/paypal/cancel', (req, res) => res.redirect('/?cancelled=1'));
+app.get('/subscription/return', async (req, res) => {
+  const subId = req.query.subscription_id;
+  if (!subId) return res.redirect('/?error=missing_subscription');
+  try {
+    await refreshSubscription(subId);
+    res.redirect(`/?subscribed=${encodeURIComponent(subId)}`);
+  } catch (e) {
+    console.error(e);
+    res.redirect('/?error=subscription_failed');
+  }
+});
+app.get('/subscription/cancel', (req, res) => res.redirect('/?cancelled=1'));
 
 app.get('/api/orders/:id', (req, res) => {
   const rec = orders.get(req.params.id);
@@ -1285,4 +1545,4 @@ if (require.main === module) {
     console.log(`AgentMart running at ${BASE_URL} (PayPal env: ${PAYPAL_ENV}, configured: ${paypalConfigured}, LLM: ${llmConfigured ? LLM_MODEL : 'deterministic fallback'})`);
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription };

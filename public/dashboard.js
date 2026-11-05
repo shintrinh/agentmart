@@ -144,6 +144,14 @@ async function loadWaste() {
   return w;
 }
 
+let subsGridApi;
+async function loadSubscriptions() {
+  const { data } = await api('/api/subscriptions');
+  const list = Array.isArray(data) ? data : [];
+  if (subsGridApi) subsGridApi.setGridOption('rowData', list.map((s) => ({ ...s, box: s.box.map((i) => `${i.qty}× ${i.name}`).join(', '), nextBilling: s.nextBillingDate ? s.nextBillingDate.slice(0, 10) : '—', lastFulfilled: s.lastFulfilledAt ? s.lastFulfilledAt.slice(0, 10) : '—' })));
+  return list;
+}
+
 async function loadAll() {
   const { data: orders } = await api('/api/orders');
   const list = Array.isArray(orders) ? orders : [];
@@ -170,6 +178,7 @@ async function loadAll() {
   await loadForecast();
   await loadPlans();
   await loadWaste();
+  await loadSubscriptions();
 }
 
 document.getElementById('adjustForm').addEventListener('submit', async (e) => {
@@ -379,6 +388,53 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     rowData: [],
   };
   invoicesGridApi = agGrid.createGrid(document.getElementById('invoicesGrid'), invoicesOptions);
+
+  const subsOptions = {
+    columnDefs: [
+      { field: 'id', headerName: 'Subscription id', filter: true, flex: 2 },
+      { field: 'status', filter: true, flex: 1 },
+      { field: 'amount', headerName: 'Per week (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
+      { field: 'box', headerName: 'Box contents', filter: true, flex: 3 },
+      { field: 'nextBilling', headerName: 'Next billing', filter: true, flex: 1 },
+      { field: 'lastFulfilled', headerName: 'Last fulfilled', filter: true, flex: 1 },
+      {
+        headerName: 'Actions', flex: 2,
+        cellRenderer: (p) => {
+          const id = p.data.id;
+          const acts = [['refresh', 'Refresh'], ['fulfill', 'Fulfill box']];
+          if (p.data.status === 'ACTIVE') acts.push(['suspend', 'Suspend']);
+          if (p.data.status === 'SUSPENDED') acts.push(['activate', 'Activate']);
+          if (p.data.status !== 'CANCELLED') acts.push(['cancel', 'Cancel']);
+          return acts.map(([a, label]) => `<button class="add-btn" data-sub-action="${a}|${id}">${label}</button>`).join(' ');
+        },
+      },
+    ],
+    defaultColDef: { sortable: true, resizable: true },
+    rowData: [],
+  };
+  subsGridApi = agGrid.createGrid(document.getElementById('subsGrid'), subsOptions);
+
+  document.getElementById('subsGrid').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-sub-action]');
+    if (!b) return;
+    const [action, id] = b.dataset.subAction.split('|');
+    const msg = document.getElementById('subMsg');
+    msg.textContent = `${action}…`;
+    const { ok, data: out } = await api(`/api/subscriptions/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: JSON.stringify({}) });
+    msg.textContent = ok ? (out.orderId ? `Fulfilled — PayPal order ${out.orderId} for ${money(out.total)}. Approve it on PayPal sandbox.` : `Subscription ${id} is now ${out.status || action + 'ed'}.`) : (out.message || 'Could not do that.');
+    if (ok) loadAll();
+  });
+
+  document.getElementById('subForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('subMsg');
+    const budget = Number(document.getElementById('subBudget').value);
+    msg.textContent = 'Setting up the subscription…';
+    const { ok, data } = await api('/api/subscriptions', { method: 'POST', body: JSON.stringify({ budget }) });
+    if (!ok) { msg.textContent = data.message || 'Could not set up the subscription.'; return; }
+    msg.innerHTML = `Subscription ${data.subscriptionId} created (${money(data.amount)}/week) — <a href="${data.approveUrl}" target="_blank" rel="noopener">approve it on PayPal sandbox</a>.`;
+    if (ok) loadSubscriptions();
+  });
 
   await loadAll();
 })();

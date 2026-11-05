@@ -445,6 +445,42 @@ test('check_savings tool is registered for the LLM', () => {
   assert.match(tool.function.description, /saved/);
 });
 
+test('v7 subscription tools are registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  for (const name of ['create_subscription', 'check_subscriptions', 'cancel_subscription', 'fulfill_subscription']) {
+    assert.ok(llmTools.find((t) => t.function.name === name), `${name} missing`);
+  }
+  assert.equal(llmTools.length, 16);
+});
+
+test('subscriptionView formats a stored subscription', () => {
+  const { subscriptionView } = require('./server');
+  const v = subscriptionView('I-TEST1', { planId: 'P-X', amount: 56, status: 'APPROVAL_PENDING', boxItems: [{ name: 'Ceremonial Matcha · 500g', qty: 2 }], createdAt: '2026-11-05T00:00:00.000Z', lastFulfilledAt: null, nextBillingDate: null });
+  assert.equal(v.id, 'I-TEST1');
+  assert.equal(v.amount, 56);
+  assert.equal(v.status, 'APPROVAL_PENDING');
+  assert.equal(v.box.length, 1);
+  assert.equal(v.nextBillingDate, null);
+});
+
+test('subscriptions list starts empty; bad budget rejected; unknown ids 404', async () => {
+  const list = await api('/api/subscriptions');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.data, []);
+  const bad = await api('/api/subscriptions', { method: 'POST', body: JSON.stringify({ budget: -5 }) });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.data.error, 'INVALID_INPUT');
+  for (const action of ['refresh', 'cancel', 'suspend', 'activate', 'fulfill']) {
+    const r = await api(`/api/subscriptions/I-NOPE/${action}`, { method: 'POST', body: JSON.stringify({}) });
+    assert.equal(r.status, 404, action);
+  }
+});
+
+test('agent reports no subscriptions when none exist', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-subs', message: 'What subscriptions do I have?' }) });
+  assert.match(data.reply, /No subscriptions yet/);
+});
+
 test('demo reset restores seed stock and clears waste', async () => {
   const { status, data } = await api('/api/demo/reset', { method: 'POST', body: JSON.stringify({}) });
   assert.equal(status, 200);

@@ -190,6 +190,9 @@ document.querySelectorAll('.prompt-chip').forEach((c) =>
     banner.textContent = ord.ok
       ? `✅ Payment captured! Order ${params.get('paid')} — ${money(ord.data.total)} via PayPal sandbox. The agent has cleared your cart.`
       : `✅ Payment captured for order ${params.get('paid')} (PayPal sandbox).`;
+  } else if (params.get('subscribed')) {
+    banner.className = 'banner banner-ok';
+    banner.textContent = `✅ Weekly restock subscription ${params.get('subscribed')} is active on PayPal sandbox — it bills the box every week. See it on the merchant dashboard.`;
   } else if (params.get('cancelled')) {
     banner.className = 'banner banner-warn';
     banner.textContent = 'Payment was cancelled at PayPal — your cart is untouched.';

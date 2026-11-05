@@ -20,9 +20,11 @@ orders above that max.
 AgentMart is a working café-restocking store with two ways to buy and one
 merchant view:
 1. **Agent path (the point of the project):** chat with the shopping agent,
-   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over seven tools
-   (`search_products`, `add_to_cart`, `view_cart`, `create_checkout`,
-   `order_status`, `check_stock`, `smart_restock`). It checks inventory
+   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over sixteen tools
+   (`search_products`, `add_to_cart`, `remove_from_cart`, `view_cart`, `create_checkout`,
+   `order_status`, `check_stock`, `smart_restock`, `check_prices`, `check_payables`,
+   `check_savings`, `run_restock_plan`, `create_subscription`, `check_subscriptions`,
+   `cancel_subscription`, `fulfill_subscription`). It checks inventory
    (stock on hand, days left at current usage, LOW/OUT alerts), sizes a
    smart restock from burn rate × (supplier lead time + 7 days of cover)
    inside a budget in a single tool call, creates a PayPal Checkout order
@@ -52,19 +54,28 @@ merchant view:
    restock plans (create / run / pause / delete, with next-run date);
    stocktake adjustment and a demo-reset button; plus PayPal invoice
    creation, sending and live status refresh from any order (Invoicing API
-   v2), with a follow-up flag for invoices sent more than 7 days ago.
+   v2), with a follow-up flag for invoices sent more than 7 days ago; and
+   a subscriptions grid (AG Grid) for the weekly restock box — status,
+   weekly amount, box contents, next billing date, last fulfilled — with
+   Refresh / Fulfill / Suspend / Activate / Cancel actions.
 
 All paths share one cart/order/inventory/price state (persisted in SQLite)
 and one PayPal Orders API v2 integration (create → buyer approval →
 server-side capture), running on the PayPal sandbox. Capturing a restock
-order adds the delivery to stock.
+order adds the delivery to stock. A weekly restock plan can also become a
+real PayPal subscription (Subscriptions API): the agent sizes the week's
+box, creates the weekly billing plan and subscription, the merchant approves
+once, and PayPal bills the box every week — the agent fulfills each week's
+box from the subscription. Sandbox billing runs on the real weekly cycle,
+so the second charge lands 7 days out rather than inside the demo.
 
 ## How we built it
 - Node.js + Express server; vanilla JS frontend (no build step); SQLite
   persistence (`node:sqlite`).
 - PayPal integration: OAuth client-credentials + Orders API v2, server-side
   create/capture, return/cancel URL flow; Invoicing API v2 for merchant
-  invoices.
+  invoices; Subscriptions API (Catalog Products → Billing Plans → Subscriptions:
+  create / get / suspend / activate / cancel) for the weekly restock box.
 - The agent calls Muse Spark Open (Baseten first, Fireworks fallback, OpenAI-compatible Chat
   Completions) with tool definitions; a deterministic intent engine over the
   same tools is the fallback when no LLM key is set, and every reply names
@@ -109,7 +120,7 @@ order adds the delivery to stock.
   Render health check.
 
 ## Tools used (for the "Tools" field)
-- PayPal Developer Platform — Checkout / Orders API v2, Invoicing API v2, sandbox environment
+- PayPal Developer Platform — Checkout / Orders API v2, Invoicing API v2, Subscriptions API (Catalog Products, Billing Plans, Subscriptions), sandbox environment
 - Muse Spark Open (Baseten meta-models/muse-spark-open-1026, fallback Fireworks accounts/fireworks/models/muse-spark-open) — LLM with tool calling for the shopping agent
 - AG Grid Community — merchant dashboard data grid
 - Node.js, Express, SQLite (node:sqlite)
@@ -167,9 +178,9 @@ dashboard and the SQLite persistence — was built in that window.
   README.
 
 ## What's next
-- Recurring restock subscriptions (PayPal Subscriptions API) for weekly café orders.
-- Automatic payment reminders for sent invoices; webhooks for asynchronous payment events.
-- A second LLM provider behind the same tool layer for comparison.
+- Webhooks for asynchronous payment events (subscription billing, invoice paid) so the dashboard updates without a refresh.
+- Subscription revise: change the weekly box price when burn rate shifts, without cancelling and re-subscribing.
+- Automatic payment reminders for sent invoices.
 
 ---
 
@@ -186,26 +197,32 @@ dashboard and the SQLite persistence — was built in that window.
 - **0:45–1:05 — Did any prices go up?** Ask the agent → it reports the
   creepers (Matcha +10.5%, Arabica +9.1% in 3 months) and names the cheaper
   alternate suppliers.
-- **1:05–1:50 — The agentic moment.** Click the prompt chip "Smart restock
+- **1:05–1:45 — The agentic moment.** Click the prompt chip "Smart restock
   under $60" → agent sizes the restock by burn rate, buys oat milk from
   Green Valley Farms ($14 instead of $16, saves $2), total $56 with an
   expected delivery date; creates a PayPal order, shows the approval
   button. Click it → PayPal sandbox login (buyer test account) → approve.
-- **1:50–2:20 — Capture.** Land back on the store with the green "Payment
+- **1:45–2:05 — Capture.** Land back on the store with the green "Payment
   captured" banner. Ask the agent: "What is the status of my order?" → it
   reports the captured order and total.
-- **2:20–2:55 — Merchant dashboard + close.** Open the dashboard: inventory
+- **2:05–2:25 — Subscribe once, bill weekly.** Ask the agent: "Set up a weekly
+  restock subscription under $60" → it sizes this week's box ($56, same
+  matcha + oat-milk), creates the PayPal subscription and shows the approve
+  link. Approve on PayPal sandbox → land back with the green "subscription
+  active" banner; the dashboard subscriptions grid shows ACTIVE with the
+  next billing date 7 days out. One line: "Approve once — the box bills
+  itself every week."
+- **2:25–2:55 — Merchant dashboard + close.** Open the dashboard: inventory
   grid with the low-stock alert, supplier price grid with creep alerts and
   best-buy column, spend stats; the order in AG Grid with its expected
-  delivery date; the payables ledger — $32 owed to Highland Roasters (Net
-  7, due 2026-11-17), $24 to Brew Gear Co. (Net 30, due 2026-12-10) — and
-  the savings stats; the forecast grid (matcha runs out 2026-11-08, order
-  by date already passed) and the weekly plan ("Weekly restock — Monday",
-  next run 2026-11-09); a 10-second waste beat — set oat-milk to 16,
-  simulate one day, $16 spoils into the ledger; create and send a draft
-  invoice from the order, then refresh its live status. Closing line:
-  "One agent, one catalog, one PayPal checkout — restock at the speed of
-  a sentence, before you run out, from the cheaper supplier, and always
+  delivery date; the payables ledger for the suppliers in the order (amount,
+  terms, due date) and the savings stats; the forecast grid (matcha runs out
+  2026-11-08, order by date already passed) and the weekly plan ("Weekly
+  restock — Monday", next run 2026-11-09); a 10-second waste beat — set
+  oat-milk to 16, simulate one day, $16 spoils into the ledger; create and
+  send a draft invoice from the order, then refresh its live status. Closing
+  line: "One agent, one catalog, one PayPal checkout — restock at the speed
+  of a sentence, before you run out, from the cheaper supplier, and always
   know what you owe — and what not to buy."
 
 Recording notes: use sandbox buyer credentials (never a real account), record
