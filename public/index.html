@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentMart — Agentic Commerce Demo Store</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🛒</span>
+    <div>
+      <h1>AgentMart</h1>
+      <p>Agentic commerce demo — an AI agent shops &amp; pays for you</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <a class="nav-link" href="/dashboard.html">📊 Merchant dashboard</a>
+    <span id="paypalStatus" class="chip chip-warn">PayPal: checking…</span>
+    <button id="cartBtn" class="cart-btn">🧺 Cart <span id="cartCount" class="badge">0</span></button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<section class="hero">
+  <h2>Restock the café. Don’t browse. Just ask.</h2>
+  <p>AgentMart is a café procurement copilot: the AI agent watches your stock,
+     warns you before you run out, and restocks inside your budget with a real
+     <strong>PayPal sandbox checkout</strong> — you only approve the payment.
+     Ask it “what am I running out of?”, say “smart restock”, or reorder last
+     week’s order in one click. Shop manually instead, or follow stock, orders
+     and spend on the <a href="/dashboard.html">merchant dashboard</a>.</p>
+  <div class="hero-prompts">
+    <button class="prompt-chip" data-prompt="What am I running out of?">⚠️ What am I running out of?</button>
+    <button class="prompt-chip" data-prompt="Smart restock under $60">⚡ Smart restock under $60</button>
+    <button class="prompt-chip" data-prompt="Reorder my last order">↻ Reorder my last order</button>
+    <button class="prompt-chip" data-prompt="Show me gear under $30">Show me gear under $30</button>
+  </div>
+</section>
+
+<main>
+  <div class="toolbar">
+    <input id="searchInput" type="search" placeholder="Search coffee, tea, gear, pantry…" aria-label="Search products" />
+    <select id="tagFilter" aria-label="Filter by category">
+      <option value="">All categories</option>
+      <option value="coffee">Coffee</option>
+      <option value="tea">Tea</option>
+      <option value="gear">Gear</option>
+      <option value="pantry">Pantry</option>
+    </select>
+  </div>
+  <div id="grid" class="grid"></div>
+  <section>
+    <h2>My orders</h2>
+    <p class="muted">Orders placed from this browser, newest first. PayPal sandbox — no real money moves.</p>
+    <div id="myOrders"></div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer hidden">
+  <div class="drawer-head">
+    <h3>Your cart</h3>
+    <button id="closeDrawer" class="icon-btn">✕</button>
+  </div>
+  <div id="cartItems" class="cart-items"></div>
+  <div class="drawer-foot">
+    <div class="total-row"><span>Total</span><strong id="cartTotal">$0.00</strong></div>
+    <button id="checkoutBtn" class="paypal-btn">Checkout with PayPal</button>
+    <p class="fineprint">PayPal <span id="envLabel">sandbox</span> — demo only, no real money moves.</p>
+    <p id="checkoutMsg" class="checkout-msg"></p>
+  </div>
+</aside>
+
+<section id="agentPanel" class="agent-panel">
+  <div class="agent-head">
+    <span>🤖 Shopping Agent</span>
+    <button id="agentToggle" class="icon-btn">–</button>
+  </div>
+  <div id="agentBody">
+    <div id="agentMessages" class="agent-messages"></div>
+    <form id="agentForm" class="agent-form">
+      <input id="agentInput" type="text" placeholder="Ask me to find, add or check out…" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </div>
+</section>
+
+<footer>
+  <p>AgentMart — built for the PayPal AI Hackathon. Demo storefront; catalog is illustrative, payments run on the PayPal sandbox.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

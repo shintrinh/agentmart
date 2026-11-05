@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentMart — Merchant Dashboard</title>
+<link rel="stylesheet" href="/vendor/ag-grid-community/styles/ag-grid.css" />
+<link rel="stylesheet" href="/vendor/ag-grid-community/styles/ag-theme-quartz.css" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🛒</span>
+    <div>
+      <h1>AgentMart — Merchant Dashboard</h1>
+      <p>Orders placed by the AI agent, paid with PayPal — live from SQLite, not a mock</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <a class="nav-link" href="/">← Storefront</a>
+    <span id="paypalStatus" class="chip chip-warn">PayPal: checking…</span>
+  </div>
+</header>
+
+<main class="dash">
+  <section class="stats" id="stats"></section>
+  <div id="lowStockAlert"></div>
+
+  <section>
+    <h2>Inventory</h2>
+    <p class="muted">Stock on hand for the sample café, with daily usage and days left at current burn rate. Capturing a restock order adds the delivery to stock. “Simulate one day” is a demo helper that advances one day of usage.</p>
+    <form id="simDayForm" class="invoice-form">
+      <button type="submit">Simulate one day of sales</button>
+    </form>
+    <p id="simDayMsg" class="checkout-msg"></p>
+    <div id="inventoryGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+    <div id="overstockAlert"></div>
+    <form id="adjustForm" class="invoice-form">
+      <select id="adjustProduct" aria-label="Product">
+        <option value="arabica-beans">Arabica Coffee Beans · 1kg</option>
+        <option value="robusta-beans">Robusta Coffee Beans · 1kg</option>
+        <option value="pourover-set">Ceramic Pour-Over Set</option>
+        <option value="coldbrew-bottle">Cold Brew Bottle · 750ml</option>
+        <option value="matcha">Ceremonial Matcha · 500g</option>
+        <option value="sugar-syrup">Brown Sugar Syrup · 750ml</option>
+        <option value="oat-milk">Oat Milk · 1L × 6</option>
+        <option value="barista-scale">Digital Barista Scale</option>
+      </select>
+      <input id="adjustStock" type="number" min="0" max="999" step="1" value="8" aria-label="Stock on hand" required />
+      <button type="submit">Set stock (stocktake)</button>
+    </form>
+    <p id="adjustMsg" class="checkout-msg"></p>
+    <button id="resetDemoBtn" class="add-btn">Reset demo to seed state</button>
+    <p id="resetDemoMsg" class="checkout-msg"></p>
+  </section>
+
+  <section>
+    <h2>Waste — what spoiled</h2>
+    <p class="muted">Perishables stocked above their max spoil a little every simulated day (10% of the excess). This is a demo simulation of the carrying cost of overbuying.</p>
+    <div id="wasteStats" class="stats"></div>
+    <div id="wasteGrid" class="ag-theme-quartz" style="height: 200px; width: 100%;"></div>
+  </section>
+
+  <section>
+    <h2>Supplier prices</h2>
+    <p class="muted">Price history is demo data (Aug–Nov 2026) for the sample café. “Best buy” is the supplier smart restock actually orders from: the alternate wins when it is cheaper and no more than 2 days slower.</p>
+    <div id="priceAlert"></div>
+    <div id="pricesGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+  </section>
+
+  <section>
+    <h2>Payables — what you owe suppliers</h2>
+    <p class="muted">Created when an order is captured, split per supplier. Due date = expected delivery + payment terms (COD = on delivery). Payables only exist for captured orders — an order awaiting approval is not money owed yet.</p>
+    <p id="payablesSummary" class="muted"></p>
+    <form id="payPayableForm" class="invoice-form">
+      <input id="payPayableId" type="text" placeholder="Payable id, e.g. pay-19T958561E596930N-kyoto-tea-imports" required />
+      <button type="submit">Mark as paid</button>
+    </form>
+    <p id="payPayableMsg" class="checkout-msg"></p>
+    <div id="payablesGrid" class="ag-theme-quartz" style="height: 260px; width: 100%;"></div>
+  </section>
+
+  <section>
+    <h2>Forecast — when things run out</h2>
+    <p class="muted">Projected from current stock and daily usage (demo forecast, not machine learning). “Order by” is the stock-out date minus the supplier lead time — if it has passed, order now.</p>
+    <div id="forecastGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+  </section>
+
+  <section>
+    <h2>Weekly restock plans</h2>
+    <p class="muted">Set the schedule once; run it from here or by asking the agent (“run my weekly restock”). Plans run when you ask — there is no background cron on the free demo host.</p>
+    <form id="planForm" class="invoice-form">
+      <input id="planName" type="text" placeholder="Plan name, e.g. Weekly restock — Monday" required />
+      <select id="planDay" aria-label="Day of week">
+        <option value="1">Monday</option>
+        <option value="2">Tuesday</option>
+        <option value="3">Wednesday</option>
+        <option value="4">Thursday</option>
+        <option value="5">Friday</option>
+        <option value="6">Saturday</option>
+        <option value="0">Sunday</option>
+      </select>
+      <input id="planBudget" type="number" min="1" step="1" value="60" aria-label="Budget in USD" required />
+      <button type="submit">Create plan</button>
+    </form>
+    <p id="planMsg" class="checkout-msg"></p>
+    <div id="plansList"></div>
+  </section>
+
+  <section>
+    <h2>Orders</h2>
+    <p class="muted">AG Grid — sort, filter and resize any column. Every row is a real PayPal sandbox order created by the agent or the manual checkout.</p>
+    <div id="ordersGrid" class="ag-theme-quartz" style="height: 320px; width: 100%;"></div>
+  </section>
+
+  <section>
+    <h2>Invoices</h2>
+    <p class="muted">Create a PayPal invoice from a completed order, then send it to the customer. Invoices are created with the PayPal Invoicing API v2 (sandbox).</p>
+    <form id="invoiceForm" class="invoice-form">
+      <input id="invoiceOrderId" type="text" placeholder="PayPal order id, e.g. 19T958561E596930N" required />
+      <input id="invoiceEmail" type="email" placeholder="Customer email" required />
+      <button type="submit">Create invoice (draft)</button>
+    </form>
+    <p id="invoiceMsg" class="checkout-msg"></p>
+    <form id="sendInvoiceForm" class="invoice-form">
+      <input id="sendInvoiceId" type="text" placeholder="PayPal invoice id to send, e.g. INV2-…" required />
+      <button type="submit">Send invoice</button>
+    </form>
+    <p id="sendInvoiceMsg" class="checkout-msg"></p>
+    <form id="refreshInvoicesForm" class="invoice-form">
+      <button type="submit">Refresh invoice statuses from PayPal</button>
+    </form>
+    <p id="refreshInvoicesMsg" class="checkout-msg"></p>
+    <div id="invoicesGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+  </section>
+</main>
+
+<footer>
+  <p>AgentMart — built for the PayPal AI Hackathon. Demo only, payments run on the PayPal sandbox.</p>
+</footer>
+
+<script src="/vendor/ag-grid-community/ag-grid-community.min.js"></script>
+<script src="/dashboard.js"></script>
+</body>
+</html>

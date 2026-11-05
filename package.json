@@ -1,0 +1,16 @@
+{
+  "dependencies": {
+    "ag-grid-community": "^36.3.0",
+    "dotenv": "^18.0.9",
+    "express": "^4.19.2"
+  },
+  "description": "AgentMart - an agentic commerce demo store: an AI shopping agent that browses the catalog, builds your cart and checks out with PayPal.",
+  "license": "MIT",
+  "name": "agentmart",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test.js"
+  },
+  "version": "1.0.0"
+}

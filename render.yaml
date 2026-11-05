@@ -1,0 +1,34 @@
+# Deploy AgentMart to Render (free tier) — one click from the repo.
+# Set the sync:false values in the Render dashboard after deploy:
+# PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET from a PayPal sandbox app,
+# LLM_API_KEY from Baseten and LLM_FALLBACK_API_KEY from Fireworks
+# (optional — deterministic fallback if both are empty).
+services:
+  - type: web
+    name: agentmart
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: LLM_BASE_URL
+        value: https://inference.baseten.co/v1
+      - key: LLM_MODEL
+        value: meta-models/muse-spark-open-1026
+      - key: LLM_FALLBACK_BASE_URL
+        value: https://api.fireworks.ai/inference/v1
+      - key: LLM_FALLBACK_MODEL
+        value: accounts/fireworks/models/muse-spark-open
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_FALLBACK_API_KEY
+        sync: false
