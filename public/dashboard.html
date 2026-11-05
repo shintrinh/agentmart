@@ -29,7 +29,7 @@
 
   <section>
     <h2>Inventory</h2>
-    <p class="muted">Stock on hand for the sample café, with daily usage and days left at current burn rate. Capturing a restock order adds the delivery to stock. “Simulate one day” is a demo helper that advances one day of usage.</p>
+    <p class="muted">Stock on hand for the Blue Bottle Coffee café, with daily usage and days left at current burn rate. Capturing a restock order adds the delivery to stock. “Simulate one day” is a demo helper that advances one day of usage.</p>
     <form id="simDayForm" class="invoice-form">
       <button type="submit">Simulate one day of sales</button>
     </form>
@@ -38,14 +38,14 @@
     <div id="overstockAlert"></div>
     <form id="adjustForm" class="invoice-form">
       <select id="adjustProduct" aria-label="Product">
-        <option value="arabica-beans">Arabica Coffee Beans · 1kg</option>
-        <option value="robusta-beans">Robusta Coffee Beans · 1kg</option>
-        <option value="pourover-set">Ceramic Pour-Over Set</option>
-        <option value="coldbrew-bottle">Cold Brew Bottle · 750ml</option>
-        <option value="matcha">Ceremonial Matcha · 500g</option>
-        <option value="sugar-syrup">Brown Sugar Syrup · 750ml</option>
-        <option value="oat-milk">Oat Milk · 1L × 6</option>
-        <option value="barista-scale">Digital Barista Scale</option>
+        <option value="arabica-beans">Blue Bottle Blend Beans · Arabica 12 oz</option>
+        <option value="robusta-beans">Blue Bottle Single Origin Beans · Robusta 12 oz</option>
+        <option value="pourover-set">Blue Bottle Dripper</option>
+        <option value="coldbrew-bottle">Blue Bottle Bright Cold Brew · 8 oz</option>
+        <option value="matcha">Blue Bottle Craft Matcha · 100 g</option>
+        <option value="instant-coffee">Blue Bottle Craft Instant Coffee</option>
+        <option value="oat-milk">Oatly Barista Oat Milk · 32 oz</option>
+        <option value="barista-scale">Acaia Pearl Scale</option>
       </select>
       <input id="adjustStock" type="number" min="0" max="999" step="1" value="8" aria-label="Stock on hand" required />
       <button type="submit">Set stock (stocktake)</button>
@@ -64,7 +64,7 @@
 
   <section>
     <h2>Supplier prices</h2>
-    <p class="muted">Price history is demo data (Aug–Nov 2026) for the sample café. “Best buy” is the supplier smart restock actually orders from: the alternate wins when it is cheaper and no more than 2 days slower.</p>
+    <p class="muted">Current prices are Blue Bottle's published retail prices (verified 2026-11-05 — see README); the Aug–Oct 2026 history is illustrative demo data. “Best buy” is the supplier smart restock actually orders from: the alternate wins when it is cheaper and no more than 2 days slower. Creep = up more than 5% in 3 months; drop = down more than 5% — a falling price is a good time to stock up.</p>
     <div id="priceAlert"></div>
     <div id="pricesGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
   </section>
@@ -133,7 +133,8 @@
 
   <section>
     <h2>Invoices</h2>
-    <p class="muted">Create a PayPal invoice from a completed order, then send it to the customer. Invoices are created with the PayPal Invoicing API v2 (sandbox).</p>
+    <p class="muted">Create a PayPal invoice from a completed order, then send it to the customer. Invoices are created with the PayPal Invoicing API v2 (sandbox) on NET_30 terms — due date is 30 days after creation. A SENT invoice past its due date shows as overdue; use <strong>Send reminder</strong> (or ask the agent) to send a PayPal payment reminder.</p>
+    <div id="overdueAlert"></div>
     <form id="invoiceForm" class="invoice-form">
       <input id="invoiceOrderId" type="text" placeholder="PayPal order id, e.g. 19T958561E596930N" required />
       <input id="invoiceEmail" type="email" placeholder="Customer email" required />

@@ -78,9 +78,11 @@ async function loadPrices() {
   const { data } = await api('/api/prices');
   const rows = Array.isArray(data) ? data : [];
   const creep = rows.filter((r) => r.creep);
-  document.getElementById('priceAlert').innerHTML = creep.length
-    ? `<div class="alert">⚠️ Price creep (&gt;5% in 3 months, demo history Aug–Nov 2026): ${creep.map((r) => `${r.name} +${r.changePct3mo}%`).join('; ')}. Smart restock buys from the cheaper alternate supplier where one exists.</div>`
-    : '';
+  const drops = rows.filter((r) => r.drop);
+  const alerts = [];
+  if (creep.length) alerts.push(`<div class="alert">⚠️ Price creep (&gt;5% in 3 months, demo history Aug–Nov 2026): ${creep.map((r) => `${r.name} +${r.changePct3mo}%`).join('; ')}. Smart restock buys from the cheaper alternate supplier where one exists.</div>`);
+  if (drops.length) alerts.push(`<div class="alert">📉 Price drops (&gt;5% down in 3 months): ${drops.map((r) => `${r.name} ${r.changePct3mo}%`).join('; ')}. A falling price is a good time to stock up — smart restock already buys at the current lower price.</div>`);
+  document.getElementById('priceAlert').innerHTML = alerts.join('');
   if (pricesGridApi) pricesGridApi.setGridOption('rowData', rows.map((r) => ({
     name: r.name,
     current: r.current,
@@ -175,10 +177,18 @@ async function loadAll() {
   if (ordersGridApi) ordersGridApi.setGridOption('rowData', rows);
   const { data: invoices } = await api('/api/invoices');
   const now = Date.now();
+  const today = new Date().toISOString().slice(0, 10);
   const invRows = (Array.isArray(invoices) ? invoices : []).map((v) => ({
     id: v.id, invoiceId: v.invoiceId, orderId: v.orderId, status: v.status, recipient: v.recipient, total: Number(v.total), createdAt: v.createdAt,
+    dueDate: v.dueDate || '—',
+    overdue: v.status === 'SENT' && v.dueDate && v.dueDate < today ? 'Yes — overdue' : '—',
+    lastReminded: v.lastRemindedAt ? v.lastRemindedAt.slice(0, 19).replace('T', ' ') : '—',
     followUp: v.status === 'SENT' && now - new Date(v.createdAt).getTime() > 7 * 86400000 ? 'Yes — follow up' : '—',
   }));
+  const overdueInv = invRows.filter((r) => r.overdue !== '—');
+  document.getElementById('overdueAlert').innerHTML = overdueInv.length
+    ? `<div class="alert">⏰ Overdue invoices: ${overdueInv.map((r) => `${r.invoiceId} — ${money(r.total)}, due ${r.dueDate}`).join('; ')}. Send a reminder from the grid or ask the agent.</div>`
+    : '';
   if (invoicesGridApi) invoicesGridApi.setGridOption('rowData', invRows);
   await loadInventory();
   await loadPrices();
@@ -391,7 +401,16 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'status', filter: true, flex: 1 },
       { field: 'recipient', filter: true, flex: 2 },
       { field: 'total', headerName: 'Total (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
+      { field: 'dueDate', headerName: 'Due', filter: true, flex: 1 },
+      { field: 'overdue', headerName: 'Overdue?', filter: true, flex: 1 },
+      { field: 'lastReminded', headerName: 'Last reminded', filter: true, flex: 1 },
       { field: 'followUp', headerName: 'Follow up?', filter: true, flex: 1 },
+      {
+        headerName: 'Actions', flex: 1,
+        cellRenderer: (p) => (p.data.status === 'SENT'
+          ? `<button class="add-btn" data-invoice-remind="${p.data.id}">Send reminder</button>`
+          : ''),
+      },
     ],
     defaultColDef: { sortable: true, resizable: true },
     rowData: [],
@@ -451,6 +470,16 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     } else {
       msg.textContent = ok ? (out.orderId ? `Fulfilled — PayPal order ${out.orderId} for ${money(out.total)}. Approve it on PayPal sandbox.` : `Subscription ${id} is now ${out.status || action + 'ed'}.`) : (out.message || 'Could not do that.');
     }
+    if (ok) loadAll();
+  });
+
+  document.getElementById('invoicesGrid').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-invoice-remind]');
+    if (!b) return;
+    const msg = document.getElementById('refreshInvoicesMsg');
+    msg.textContent = 'Sending reminder…';
+    const { ok, data } = await api(`/api/invoices/${encodeURIComponent(b.dataset.invoiceRemind)}/remind`, { method: 'POST', body: JSON.stringify({}) });
+    msg.textContent = ok ? `Reminder sent for invoice ${data.invoiceId}.` : (data.message || 'Could not send the reminder.');
     if (ok) loadAll();
   });
 

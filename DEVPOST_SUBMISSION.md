@@ -5,24 +5,29 @@
 AgentMart — the AI procurement copilot that restocks your café before you run out, and pays with PayPal
 
 ## Tagline / elevator pitch
-A small café restocks by talking to an AI agent: "smart restock under $60" —
-the agent knows what is about to run out, sizes the restock by how fast each
-item is used, watches supplier prices, buys from the cheaper supplier when
-one exists, takes it to a real PayPal checkout, and the merchant sets a
-weekly restock plan once, sees a 14-day forecast of what will run out and
-when to order, and tracks stock, prices, orders, spend, invoices — and what
-is owed to each supplier — on a live dashboard, with a running total of what
-the agent has saved. The agent also knows when *not* to buy: perishables
-stocked above their max spoil a little every day, and the restock never
-orders above that max.
+A Blue Bottle Coffee café in San Francisco restocks by talking to an AI
+agent: "smart restock under $60" — the agent knows what is about to run
+out, sizes the restock by how fast each item is used, watches supplier
+prices (up and down), buys from the cheaper supplier when one exists, takes
+it to a real PayPal checkout, and the merchant sets a weekly restock plan
+once, sees a 14-day forecast of what will run out and when to order, and
+tracks stock, prices, orders, spend, invoices — and what is owed to each
+supplier — on a live dashboard, with a running total of what the agent has
+saved. The agent also knows when *not* to buy: perishables stocked above
+their max spoil a little every day, and the restock never orders above that
+max. And when a customer is late paying an invoice, the agent reminds them
+on PayPal.
 
 ## What it does
-AgentMart is a working café-restocking store with two ways to buy and one
-merchant view:
+AgentMart is a working café-restocking store for a real brand — a Blue
+Bottle Coffee café in San Francisco, stocked at Blue Bottle's published
+retail prices (verified 2026-11-05 from the brand's public menus; see
+README "Demo data sources") — with two ways to buy and one merchant view:
 1. **Agent path (the point of the project):** chat with the shopping agent,
-   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over eighteen tools
+   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over twenty-one tools
    (`search_products`, `add_to_cart`, `remove_from_cart`, `view_cart`, `create_checkout`,
-   `order_status`, `check_stock`, `smart_restock`, `check_prices`, `check_payables`,
+   `order_status`, `check_stock`, `smart_restock`, `check_prices`, `check_price_drops`, `check_payables`,
+   `check_overdue_invoices`, `remind_invoice`,
    `check_savings`, `run_restock_plan`, `create_subscription`, `check_subscriptions`,
    `cancel_subscription`, `fulfill_subscription`, `check_recent_events`, `revise_subscription`). It checks inventory
    (stock on hand, days left at current usage, LOW/OUT alerts), sizes a
@@ -32,19 +37,24 @@ merchant view:
    of stock, the agent substitutes the closest same-category in-stock item,
    explains the swap and the price difference, and can remove it on request
    (`remove_from_cart` tool + deterministic remove intent). The agent also
-   watches supplier prices (`check_prices` tool): it flags prices that
-   crept up more than 5% in 3 months and names the cheaper alternate
-   supplier. Smart restock buys each line from the best supplier (the
-   alternate wins when cheaper and no more than 2 days slower), prices the
-   cart line at that supplier, and every order carries an expected delivery
-   date (today + longest supplier lead time).
+   watches supplier prices (`check_prices` / `check_price_drops` tools): it
+   flags prices that crept up more than 5% in 3 months and prices that
+   dropped more than 5% — a falling price is a buying opportunity — and
+   names the cheaper alternate supplier. Smart restock buys each line from
+   the best supplier (the alternate wins when cheaper and no more than 2
+   days slower), prices the cart line at that supplier, and every order
+   carries an expected delivery date (today + longest supplier lead time).
+   On the money side the agent watches for overdue invoices and payables
+   (`check_overdue_invoices`) and reminds the payer through PayPal
+   (`remind_invoice`, Invoicing remind API) — only SENT invoices can be
+   reminded.
 2. **Manual path:** classic catalog (search + category filter, stock badges
    on every card) + cart drawer with PayPal checkout + one-click "Reorder
    my last order" and a "My orders" history with expected delivery dates.
 3. **Merchant dashboard:** inventory in AG Grid with low-stock and
-   overstock alerts, supplier prices in AG Grid with creep alerts and a
-   best-buy column, and spend stats (this month, top item by spend); all
-   orders in AG Grid (sort, filter, resize) with captured-revenue stats
+   overstock alerts, supplier prices in AG Grid with creep and drop alerts
+   and a best-buy column, and spend stats (this month, top item by spend);
+   all orders in AG Grid (sort, filter, resize) with captured-revenue stats
    and expected delivery dates; a payables ledger in AG Grid — what is
    owed per supplier, with payment terms, due dates, overdue flags and
    mark-as-paid — created automatically when an order is captured; savings
@@ -54,10 +64,11 @@ merchant view:
    restock plans (create / run / pause / delete, with next-run date);
    stocktake adjustment and a demo-reset button; plus PayPal invoice
    creation, sending and live status refresh from any order (Invoicing API
-   v2), with a follow-up flag for invoices sent more than 7 days ago; and
-   a subscriptions grid (AG Grid) for the weekly restock box — status,
-   weekly amount, box contents, next billing date, last fulfilled — with
-   Refresh / Fulfill / Suspend / Activate / Cancel actions.
+   v2, NET_30 terms with a due date, overdue flags and a Send reminder
+   button per SENT invoice); and a subscriptions grid (AG Grid) for the
+   weekly restock box — status, weekly amount, box contents, next billing
+   date, last fulfilled — with Refresh / Fulfill / Suspend / Activate /
+   Cancel actions.
 
 All paths share one cart/order/inventory/price state (persisted in SQLite)
 and one PayPal Orders API v2 integration (create → buyer approval →
@@ -93,16 +104,25 @@ so the second charge lands 7 days out rather than inside the demo.
   point, a supplier lead time and a supplier; `daysLeft = stock / dailyUse`.
   Order quantities are always whole units (fractional stock after simulated
   usage is rounded up when sizing a restock).
-- Supplier intelligence: a `price_history` table (seeded demo data,
-  Aug–Oct 2026) drives creep alerts; each product has one alternate
-  supplier, and smart restock picks the best per line. Cart lines carry a
-  per-line supplier price override so PayPal charges exactly the chosen
-  supplier's price — the override survives quantity edits and reorders.
+- Supplier intelligence: a `price_history` table (current prices are Blue
+  Bottle's verified published retail prices; the Aug–Oct 2026 points are an
+  illustrative demo series built around them) drives creep alerts (>5% up
+  in 3 months) and drop alerts (>5% down in 3 months); each product has one
+  alternate supplier, and smart restock picks the best per line. Cart lines
+  carry a per-line supplier price override so PayPal charges exactly the
+  chosen supplier's price — the override survives quantity edits and
+  reorders.
 - Money view: a `payables` table (supplier, amount, due date = expected
   delivery + payment terms, status) is written when an order is captured
   and backfilled for older captured orders; every order also records what
   it saved vs catalog prices and how many stock-outs it prevented, so the
-  dashboard can show the agent's impact in dollars.
+  dashboard can show the agent's impact in dollars. Invoices are created
+  on NET_30 terms with a stored due date (PayPal returns no due_date
+  field, so the server computes created + 30 days); the agent and the
+  dashboard flag SENT invoices past their due date as overdue and can send
+  a PayPal payment reminder (`POST /v2/invoicing/invoices/{id}/remind`,
+  204) — only SENT invoices can be reminded, validated server-side
+  before any PayPal call.
 - Autopilot: a `restock_plans` table (name, day of week, budget, active,
   last run) — the agent creates a plan from one sentence ("set up a weekly
   restock every Monday under $60") and runs it on command
@@ -153,6 +173,7 @@ dashboard and the SQLite persistence — was built in that window.
   the first smart-restock plan produced a 3.3-unit quantity that PayPal
   rejected (400). Fix: restock quantities are rounded up to whole units and
   the PayPal item quantity is rounded defensively at checkout.
+  reorders.
 - A promise the agent could not keep: the first substitution reply told the
   user to say "remove robusta", but no remove intent existed. Caught in
   live testing before it shipped — fixed with a `remove_from_cart` tool and
@@ -162,8 +183,9 @@ dashboard and the SQLite persistence — was built in that window.
   cheaper alternate supplier's price had nowhere to live and PayPal would
   have charged the catalog price. Fix: cart entries carry an optional
   `{qty, price, supplier, leadTimeDays}` override; old carts (plain
-  quantities) still read correctly. Verified: smart restock totals $56
-  with the oat-milk line at $14 from Green Valley Farms.
+  quantities) still read correctly. Verified (v3 seed): smart restock
+  totals $56 with the oat-milk line at $14 from Green Valley Farms; v10
+  seed: $58.47 with the oat-milk line at $5.99.
 - A startup crash the tests missed: the payables backfill ran at module
   load, before the `SUPPLIER_TERMS` const it calls was initialized
   (temporal dead zone) — the server crashed on start. Tests missed it
@@ -178,58 +200,34 @@ dashboard and the SQLite persistence — was built in that window.
   delivery date reconstructed per the v3 rule — and the payables backfill
   then produced its two rows ($32 Highland Roasters, $24 Brew Gear Co.).
 - PayPal Invoicing: the API rejects some `payment_term` values
-  (`NET_7` is invalid) — `DUE_ON_RECEIPT` is the correct term type.
+  (`NET_7` is invalid) — v10 uses `NET_30`, which gives every invoice a
+  real 30-day due date. Sending an invoice with an explicit invoicer email
+  fails with 422 USER_NOT_FOUND unless that email is the PayPal account
+  that owns the app — the v10 probe caught this (the old hardcoded
+  `merchant@agentmart.example` meant "Send invoice" never worked), and the
+  fix is to send no invoicer object at all: PayPal defaults the invoicer
+  to the API caller (verified: send → 200, remind on a SENT invoice →
+  204). Remind on a DRAFT invoice fails with 422 CANNOT_REMIND_INVOICE,
+  so the server validates SENT first.
 - Judges must be able to run the project with no PayPal account of their
   own: hence the hosted Render demo plus a verified sandbox order id in the
   README.
 
 ## What's next
-- Automatic payment reminders for sent invoices.
+- Group buying: several cafés pool one order to unlock a wholesale tier price.
+- Automatic payment reminders for sent invoices (v10 does on-demand reminders from chat and the dashboard; the auto-reminder schedule is still manual).
 
 ---
 
 ## Demo video script (must stay under 3:00, public on YouTube)
 
-- **0:00–0:20 — Problem.** "A small café loses sales to stock-outs and hours
-  to manual re-ordering — and the stock-out is usually discovered when a
-  customer complains. Supplier prices creep up a few percent at a time and
-  nobody notices. What if restocking happened before the shelf was empty,
-  from the cheaper supplier? Meet AgentMart."
-- **0:20–0:45 — What am I running out of?** Ask the agent → it lists stock
-  with days left; matcha is LOW at ~3 days. Product cards show the same
-  stock badges.
-- **0:45–1:05 — Did any prices go up?** Ask the agent → it reports the
-  creepers (Matcha +10.5%, Arabica +9.1% in 3 months) and names the cheaper
-  alternate suppliers.
-- **1:05–1:45 — The agentic moment.** Click the prompt chip "Smart restock
-  under $60" → agent sizes the restock by burn rate, buys oat milk from
-  Green Valley Farms ($14 instead of $16, saves $2), total $56 with an
-  expected delivery date; creates a PayPal order, shows the approval
-  button. Click it → PayPal sandbox login (buyer test account) → approve.
-- **1:45–2:05 — Capture.** Land back on the store with the green "Payment
-  captured" banner. Ask the agent: "What is the status of my order?" → it
-  reports the captured order and total.
-- **2:05–2:25 — Subscribe once, bill weekly.** Ask the agent: "Set up a weekly
-  restock subscription under $60" → it sizes this week's box ($56, same
-  matcha + oat-milk), creates the PayPal subscription and shows the approve
-  link. Approve on PayPal sandbox → land back with the green "subscription
-  active" banner; the dashboard subscriptions grid shows ACTIVE with the
-  next billing date 7 days out. One line: "Approve once — the box bills
-  itself every week." Then glance at the webhook events grid: PayPal already
-  pushed `BILLING.SUBSCRIPTION.ACTIVATED` — the status updated itself, no
-  Refresh click.
-- **2:25–2:55 — Merchant dashboard + close.** Open the dashboard: inventory
-  grid with the low-stock alert, supplier price grid with creep alerts and
-  best-buy column, spend stats; the order in AG Grid with its expected
-  delivery date; the payables ledger for the suppliers in the order (amount,
-  terms, due date) and the savings stats; the forecast grid (matcha runs out
-  2026-11-08, order by date already passed) and the weekly plan ("Weekly
-  restock — Monday", next run 2026-11-09); a 10-second waste beat — set
-  oat-milk to 16, simulate one day, $16 spoils into the ledger; create and
-  send a draft invoice from the order, then refresh its live status. Closing
-  line: "One agent, one catalog, one PayPal checkout — restock at the speed
-  of a sentence, before you run out, from the cheaper supplier, and always
-  know what you owe — and what not to buy."
+- **0:00–0:20 — Problem.** "A Blue Bottle café in San Francisco loses sales to stock-outs and hours to manual re-ordering — and the stock-out is usually discovered when a customer complains. Supplier prices creep up a few percent at a time and nobody notices — and a falling price is a buying opportunity nobody catches either. What if restocking happened before the shelf was empty, from the cheaper supplier? Meet AgentMart."
+- **0:20–0:45 — What am I running out of?** Ask the agent → it lists stock with days left; the Craft Matcha is LOW at ~3 days. Product cards show the same stock badges.
+- **0:45–1:05 — Did any prices go up — or down?** Ask the agent → it reports the creepers (Craft Matcha +11%, Blend Beans +9% in 3 months) and the droppers (Craft Instant Coffee −11.4%, Bright Cold Brew −10.8%) — a falling price is a good time to stock up.
+- **1:05–1:40 — The agentic moment.** Click the prompt chip "Smart restock under $60" → agent sizes the restock by burn rate, buys oat milk from Green Valley Farms ($5.99 instead of $6.39, saves $1.20), total $58.47 with an expected delivery date; creates a PayPal order, shows the approval button. Click it → PayPal sandbox login (buyer test account) → approve.
+- **1:40–2:00 — Capture.** Land back on the store with the green "Payment captured" banner. Ask the agent: "What is the status of my order?" → it reports the captured order and total.
+- **2:00–2:20 — Subscribe once, bill weekly.** Ask the agent: "Set up a weekly restock subscription under $60" → it sizes this week's box ($58.47, same matcha + oat-milk), creates the PayPal subscription and shows the approve link. Approve on PayPal sandbox → land back with the green "subscription active" banner; the dashboard subscriptions grid shows ACTIVE with the next billing date 7 days out. One line: "Approve once — the box bills itself every week." Then glance at the webhook events grid: PayPal already pushed `BILLING.SUBSCRIPTION.ACTIVATED` — the status updated itself, no Refresh click.
+- **2:20–2:55 — Merchant dashboard + close.** Open the dashboard: inventory grid with the low-stock alert, supplier price grid with creep and drop alerts and best-buy column, spend stats; the order in AG Grid with its expected delivery date; the payables ledger for the suppliers in the order (amount, terms, due date) and the savings stats; the forecast grid (matcha runs out 2026-11-08, order by date already passed) and the weekly plan ("Weekly restock — Monday", next run 2026-11-09); a 10-second waste beat — set oat-milk to 16, simulate one day, $6.39 spoils into the ledger; create and send a draft invoice from the order (NET_30, due date shown), then send a payment reminder from the grid. Closing line: "One agent, one catalog, one PayPal checkout — restock at the speed of a sentence, before you run out, from the cheaper supplier, and always know what you owe — and what not to buy."
 
 Recording notes: use sandbox buyer credentials (never a real account), record
 at 1080p, no third-party music/trademarks in the video (hackathon rule).

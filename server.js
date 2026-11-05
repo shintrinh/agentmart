@@ -5,6 +5,15 @@
  * an AI agent instead of re-ordering by hand — the agent builds the restock
  * cart inside a budget and takes it to a real PayPal checkout.
  *
+ * The demo café is a real brand: Blue Bottle Coffee (Hayes Valley,
+ * San Francisco, CA). Item prices are Blue Bottle's published retail
+ * prices, verified 2026-11-05 from the brand's public menus (DoorDash
+ * merchant menus and bluebottlecoffee.com — see README "Demo data sources").
+ * Supplier names, payment terms, alternate-supplier prices and the 3-month
+ * price history are illustrative demo data, labeled as such. Stock levels,
+ * daily usage and reorder points are demo figures for the video, not the
+ * café's real numbers.
+ *
  * What this server does:
  *  - Serves a small storefront (catalog, cart) + a merchant dashboard
  *    (/dashboard.html) built on AG Grid.
@@ -72,31 +81,43 @@ const llmProviders = [
 const llmConfigured = llmProviders.length > 0;
 
 /* ------------------------------------------------------------------ catalog */
-// Demo inventory for one sample café. stock = units on hand, dailyUse =
-// units used per day, reorderPoint = order when stock hits this level,
-// leadTimeDays = supplier delivery time. These are demo figures for the
-// sample café in this hackathon demo, not a real shop's numbers.
+// The demo café: Blue Bottle Coffee, Hayes Valley, San Francisco, CA.
+// Item prices are Blue Bottle's published retail prices, verified
+// 2026-11-05 (see README "Demo data sources"): bean bags and Craft Matcha
+// from the brand's DoorDash merchant menus (identical across SF, DC, San
+// Diego, Chicago, LA and Palo Alto listings), the Dripper from
+// bluebottlecoffee.com, the Cold Brew bottle from NYC grocery menus, the
+// Acaia Pearl Scale from acaia.co, and Oatly Barista — Blue Bottle's
+// default milk — from FreshDirect (US). The two bean bags are the demo's
+// mapping of Blue Bottle's published Blend / Single Origin bags to the
+// arabica / robusta varieties the substitute story needs. Stock, dailyUse,
+// reorderPoint, leadTimeDays, shelfLifeDays and maxStock are demo figures
+// for the video, not the café's real numbers. Suppliers, terms and
+// alternate-supplier prices are illustrative demo data.
+const CAFE = { name: 'Blue Bottle Coffee', location: 'Hayes Valley, San Francisco, CA', priceSource: 'Blue Bottle public menus (DoorDash merchant menus, bluebottlecoffee.com), verified 2026-11-05' };
 const PRODUCTS = [
-  { id: 'arabica-beans',   name: 'Arabica Coffee Beans · 1kg',  price: 18.00, emoji: '☕', tag: 'coffee', blurb: 'Single-origin highland arabica, medium roast, whole bean.', stock: 4,    dailyUse: 0.5,  reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 90,  maxStock: 8,  supplier: 'Highland Roasters', altSupplier: { name: 'Andean Direct', price: 19.00, leadTimeDays: 4 } },
-  { id: 'robusta-beans',   name: 'Robusta Coffee Beans · 1kg',  price: 14.00, emoji: '☕', tag: 'coffee', blurb: 'Bold, high-caffeine robusta - the espresso blend backbone.', stock: 6,    dailyUse: 0.4,  reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 90,  maxStock: 10, supplier: 'Highland Roasters', altSupplier: { name: 'Andean Direct', price: 13.50, leadTimeDays: 4 } },
-  { id: 'pourover-set',    name: 'Ceramic Pour-Over Set',       price: 32.00, emoji: '🍶', tag: 'gear',   blurb: 'Dripper, glass server and bamboo collar for slow coffee.', stock: 3,    dailyUse: 0.1,  reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 30.00, leadTimeDays: 6 } },
-  { id: 'coldbrew-bottle', name: 'Cold Brew Bottle · 750ml',   price: 24.00, emoji: '🧊', tag: 'gear',   blurb: 'Built-in filter bottle for 12-hour cold brew.', stock: 2,    dailyUse: 0.15, reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 26.00, leadTimeDays: 5 } },
-  { id: 'matcha',          name: 'Ceremonial Matcha · 500g',    price: 21.00, emoji: '🍵', tag: 'tea',    blurb: 'Stone-milled ceremonial grade matcha, vibrant and smooth.', stock: 1,    dailyUse: 0.3,  reorderPoint: 1, leadTimeDays: 4, shelfLifeDays: 60,  maxStock: 3,  supplier: 'Kyoto Tea Imports', altSupplier: { name: 'Uji Tea Trading', price: 22.00, leadTimeDays: 5 } },
-  { id: 'sugar-syrup',     name: 'Brown Sugar Syrup · 750ml',   price: 9.00,  emoji: '🍯', tag: 'pantry', blurb: 'Slow-cooked brown sugar syrup for milk teas and lattes.', stock: 5,    dailyUse: 0.25, reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 180, maxStock: 8,  supplier: 'Pantry Wholesale', altSupplier: { name: 'Sweet Source Co.', price: 8.00, leadTimeDays: 4 } },
-  { id: 'oat-milk',        name: 'Oat Milk · 1L × 6',           price: 16.00, emoji: '🥛', tag: 'pantry', blurb: 'Barista-edition oat milk, steams and froths cleanly.', stock: 8,    dailyUse: 1.2,  reorderPoint: 3, leadTimeDays: 2, shelfLifeDays: 14,  maxStock: 12, supplier: 'Dairy & Pantry Co.', altSupplier: { name: 'Green Valley Farms', price: 14.00, leadTimeDays: 3 } },
-  { id: 'barista-scale',   name: 'Digital Barista Scale',       price: 27.00, emoji: '⚖️', tag: 'gear',   blurb: '0.1g precision, timer built in, USB-C rechargeable.', stock: 2,    dailyUse: 0.05, reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 29.00, leadTimeDays: 5 } },
+  { id: 'arabica-beans',   name: 'Blue Bottle Blend Beans · Arabica 12 oz', price: 25.50, emoji: '☕', tag: 'coffee', blurb: 'Blue Bottle’s signature blend of arabica beans, medium roast, whole bean.', stock: 4,    dailyUse: 0.5,  reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 90,  maxStock: 8,  supplier: 'Highland Roasters', altSupplier: { name: 'Andean Direct', price: 24.50, leadTimeDays: 4 } },
+  { id: 'robusta-beans',   name: 'Blue Bottle Single Origin Beans · Robusta 12 oz', price: 31.00, emoji: '☕', tag: 'coffee', blurb: 'A bold single-origin robusta, chocolatey and full-bodied — the espresso blend backbone.', stock: 6,    dailyUse: 0.4,  reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 90,  maxStock: 10, supplier: 'Highland Roasters', altSupplier: { name: 'Andean Direct', price: 29.50, leadTimeDays: 4 } },
+  { id: 'pourover-set',    name: 'Blue Bottle Dripper',       price: 28.00, emoji: '🍶', tag: 'gear',   blurb: 'Blue Bottle’s own pour-over dripper, engineered for a slow, even extraction.', stock: 3,    dailyUse: 0.1,  reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 26.00, leadTimeDays: 6 } },
+  { id: 'coldbrew-bottle', name: 'Blue Bottle Bright Cold Brew · 8 oz', price: 5.79, emoji: '🧊', tag: 'gear',   blurb: 'Ready-to-drink bright cold brew, bottled for the grab-and-go shelf.', stock: 2,    dailyUse: 0.15, reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 6.25, leadTimeDays: 5 } },
+  { id: 'matcha',          name: 'Blue Bottle Craft Matcha · 100 g', price: 40.50, emoji: '🍵', tag: 'tea',    blurb: 'Ceremonial-grade matcha from Uji, Japan — stone-ground, 15 servings per jar.', stock: 1,    dailyUse: 0.3,  reorderPoint: 1, leadTimeDays: 4, shelfLifeDays: 60,  maxStock: 3,  supplier: 'Kyoto Tea Imports', altSupplier: { name: 'Uji Tea Trading', price: 42.00, leadTimeDays: 5 } },
+  { id: 'instant-coffee',  name: 'Blue Bottle Craft Instant Coffee', price: 3.50, emoji: '⚡', tag: 'pantry', blurb: 'Single-origin instant coffee — just add hot water, no brewer needed.', stock: 5,    dailyUse: 0.25, reorderPoint: 2, leadTimeDays: 3, shelfLifeDays: 180, maxStock: 8,  supplier: 'Pantry Wholesale', altSupplier: { name: 'Sweet Source Co.', price: 3.25, leadTimeDays: 4 } },
+  { id: 'oat-milk',        name: 'Oatly Barista Oat Milk · 32 oz', price: 6.39, emoji: '🥛', tag: 'pantry', blurb: 'Barista-edition oat milk — Blue Bottle’s default milk, steams and froths cleanly.', stock: 8,    dailyUse: 1.2,  reorderPoint: 3, leadTimeDays: 2, shelfLifeDays: 14,  maxStock: 12, supplier: 'Dairy & Pantry Co.', altSupplier: { name: 'Green Valley Farms', price: 5.99, leadTimeDays: 3 } },
+  { id: 'barista-scale',   name: 'Acaia Pearl Scale',       price: 150.00, emoji: '⚖️', tag: 'gear',   blurb: '0.1g precision, timer built in, USB-C rechargeable — the scale on the brew bar.', stock: 2,    dailyUse: 0.05, reorderPoint: 1, leadTimeDays: 5, shelfLifeDays: null, maxStock: null, supplier: 'Brew Gear Co.', altSupplier: { name: 'Kitchen Supply Hub', price: 155.00, leadTimeDays: 5 } },
 ];
-// Demo price history: monthly supplier prices Aug–Oct 2026 for the sample
-// café. Illustrative demo data, not real supplier quotes.
+// Demo price history: the CURRENT price of each item is the verified
+// Blue Bottle public price (see above); the Aug–Oct 2026 points are an
+// illustrative demo series built around it, not real supplier quotes —
+// they exist so the creep/drop alerts have something to flag.
 const PRICE_HISTORY_SEED = {
-  'arabica-beans':   [['2026-08-05', 16.50], ['2026-09-05', 17.00], ['2026-10-05', 17.50]],
-  'robusta-beans':   [['2026-08-05', 13.00], ['2026-09-05', 13.50], ['2026-10-05', 14.00]],
-  'pourover-set':    [['2026-08-05', 32.00], ['2026-09-05', 32.00], ['2026-10-05', 32.00]],
-  'coldbrew-bottle': [['2026-08-05', 24.00], ['2026-09-05', 24.00], ['2026-10-05', 24.00]],
-  'matcha':          [['2026-08-05', 19.00], ['2026-09-05', 20.00], ['2026-10-05', 21.00]],
-  'sugar-syrup':     [['2026-08-05', 9.00], ['2026-09-05', 9.00], ['2026-10-05', 9.00]],
-  'oat-milk':        [['2026-08-05', 15.00], ['2026-09-05', 15.50], ['2026-10-05', 16.00]],
-  'barista-scale':   [['2026-08-05', 27.00], ['2026-09-05', 27.00], ['2026-10-05', 27.00]],
+  'arabica-beans':   [['2026-08-05', 23.40], ['2026-09-05', 24.25], ['2026-10-05', 25.00]],
+  'robusta-beans':   [['2026-08-05', 28.50], ['2026-09-05', 29.50], ['2026-10-05', 30.50]],
+  'pourover-set':    [['2026-08-05', 28.00], ['2026-09-05', 28.00], ['2026-10-05', 28.00]],
+  'coldbrew-bottle': [['2026-08-05', 6.49], ['2026-09-05', 6.19], ['2026-10-05', 5.99]],
+  'matcha':          [['2026-08-05', 36.50], ['2026-09-05', 38.25], ['2026-10-05', 39.50]],
+  'instant-coffee':  [['2026-08-05', 3.95], ['2026-09-05', 3.75], ['2026-10-05', 3.60]],
+  'oat-milk':        [['2026-08-05', 5.99], ['2026-09-05', 6.19], ['2026-10-05', 6.29]],
+  'barista-scale':   [['2026-08-05', 150.00], ['2026-09-05', 150.00], ['2026-10-05', 150.00]],
 };
 const productById = (id) => PRODUCTS.find((p) => p.id === id);
 const money = (n) => `$${n.toFixed(2)}`;
@@ -108,7 +129,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec(`CREATE TABLE IF NOT EXISTS carts (session TEXT PRIMARY KEY, items TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, sessionId TEXT, items TEXT NOT NULL, total REAL NOT NULL, status TEXT NOT NULL, createdAt TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, orderId TEXT, invoiceId TEXT NOT NULL, status TEXT NOT NULL, recipient TEXT, total REAL NOT NULL, createdAt TEXT NOT NULL, invoiceUrl TEXT);
+CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, orderId TEXT, invoiceId TEXT NOT NULL, status TEXT NOT NULL, recipient TEXT, total REAL NOT NULL, createdAt TEXT NOT NULL, invoiceUrl TEXT, dueDate TEXT, lastRemindedAt TEXT);
 CREATE TABLE IF NOT EXISTS inventory (productId TEXT PRIMARY KEY, stock REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS price_history (productId TEXT NOT NULL, price REAL NOT NULL, recordedAt TEXT NOT NULL, source TEXT NOT NULL, UNIQUE(productId, recordedAt));
 CREATE TABLE IF NOT EXISTS payables (id TEXT PRIMARY KEY, orderId TEXT NOT NULL, supplier TEXT NOT NULL, amount REAL NOT NULL, dueDate TEXT NOT NULL, terms TEXT NOT NULL, status TEXT NOT NULL);
@@ -121,6 +142,10 @@ CREATE TABLE IF NOT EXISTS webhook_events (id TEXT PRIMARY KEY, eventType TEXT N
 // Orders gained columns in v3/v4; add them to older databases.
 for (const col of ['expectedDelivery TEXT', 'saved REAL', 'preventedStockouts INTEGER']) {
   try { db.exec(`ALTER TABLE orders ADD COLUMN ${col}`); } catch { /* already there */ }
+}
+// Invoices gained columns in v10 (due date + last reminder); same pattern.
+for (const col of ['dueDate TEXT', 'lastRemindedAt TEXT']) {
+  try { db.exec(`ALTER TABLE invoices ADD COLUMN ${col}`); } catch { /* already there */ }
 }
 
 const carts = new Map();  // sessionId -> Map(productId -> qty)
@@ -138,7 +163,7 @@ function saveOrder(id, rec) {
   db.prepare('INSERT INTO orders (id, sessionId, items, total, status, createdAt, expectedDelivery, saved, preventedStockouts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, items=excluded.items, total=excluded.total, expectedDelivery=excluded.expectedDelivery, saved=excluded.saved, preventedStockouts=excluded.preventedStockouts').run(id, rec.sessionId, JSON.stringify(rec.items), rec.total, rec.status, rec.createdAt, rec.expectedDelivery || null, rec.saved || 0, rec.preventedStockouts || 0);
 }
 function saveInvoice(id, rec) {
-  db.prepare('INSERT INTO invoices (id, orderId, invoiceId, status, recipient, total, createdAt, invoiceUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, invoiceUrl=excluded.invoiceUrl').run(id, rec.orderId, rec.invoiceId, rec.status, rec.recipient || '', rec.total, rec.createdAt, rec.invoiceUrl || '');
+  db.prepare('INSERT INTO invoices (id, orderId, invoiceId, status, recipient, total, createdAt, invoiceUrl, dueDate, lastRemindedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, invoiceUrl=excluded.invoiceUrl, dueDate=excluded.dueDate, lastRemindedAt=excluded.lastRemindedAt').run(id, rec.orderId, rec.invoiceId, rec.status, rec.recipient || '', rec.total, rec.createdAt, rec.invoiceUrl || '', rec.dueDate || null, rec.lastRemindedAt || null);
 }
 // Subscriptions (v7): a weekly restock box billed by PayPal Subscriptions.
 // The subscription itself lives on PayPal; we cache its id, plan, amount,
@@ -161,7 +186,7 @@ for (const row of db.prepare('SELECT * FROM orders ORDER BY createdAt DESC').all
   orders.set(row.id, { sessionId: row.sessionId, items: JSON.parse(row.items), total: row.total, status: row.status, createdAt: row.createdAt, expectedDelivery: row.expectedDelivery || null, saved: row.saved || 0, preventedStockouts: row.preventedStockouts || 0 });
 }
 for (const row of db.prepare('SELECT * FROM invoices ORDER BY createdAt DESC').all()) {
-  invoices.set(row.id, { orderId: row.orderId, invoiceId: row.invoiceId, status: row.status, recipient: row.recipient, total: row.total, createdAt: row.createdAt, invoiceUrl: row.invoiceUrl });
+  invoices.set(row.id, { orderId: row.orderId, invoiceId: row.invoiceId, status: row.status, recipient: row.recipient, total: row.total, createdAt: row.createdAt, invoiceUrl: row.invoiceUrl, dueDate: row.dueDate || null, lastRemindedAt: row.lastRemindedAt || null });
 }
 for (const row of db.prepare('SELECT * FROM subscription_plans').all()) {
   subscriptionPlans.set(row.amount, { planId: row.planId, productId: row.productId, createdAt: row.createdAt });
@@ -286,9 +311,12 @@ function smartRestockPlan(budget) {
 }
 
 // Price history (seeded demo data) + supplier choice + delivery estimate.
+// Upsert (not INSERT OR IGNORE): the seed is authoritative for this table,
+// so re-seeding after a catalog price change updates the stored history
+// instead of keeping stale prices from an older seed.
 for (const [pid, points] of Object.entries(PRICE_HISTORY_SEED)) {
   for (const [date, price] of points) {
-    db.prepare('INSERT OR IGNORE INTO price_history (productId, price, recordedAt, source) VALUES (?, ?, ?, ?)').run(pid, price, date, 'demo-seed');
+    db.prepare('INSERT INTO price_history (productId, price, recordedAt, source) VALUES (?, ?, ?, ?) ON CONFLICT(productId, recordedAt) DO UPDATE SET price=excluded.price, source=excluded.source').run(pid, price, date, 'demo-seed');
   }
 }
 function priceTrend(p) {
@@ -302,6 +330,10 @@ function priceTrend(p) {
     threeMonthsAgo: oldest, changePct3mo: Math.round(pct(oldest) * 10) / 10,
     lastMonth, changePct1mo: Math.round(pct(lastMonth) * 10) / 10,
     creep: pct(oldest) > 5,
+    // v10: a price DROP of more than 5% in 3 months — the mirror of creep.
+    // A falling supplier price is a buying opportunity: smart restock
+    // already buys at the current lower price, and the dashboard flags it.
+    drop: pct(oldest) < -5,
     history: [...rows.map((r) => ({ date: r.recordedAt, price: r.price })), { date: '2026-11-05', price: current }],
   };
 }
@@ -602,15 +634,24 @@ async function createPayPalInvoice(orderId, recipientEmail) {
   const rec = orders.get(orderId);
   if (!rec) throw new Error('ORDER_NOT_FOUND');
   const token = await paypalAccessToken();
+  const createdAt = new Date().toISOString();
   const body = {
     detail: {
       invoice_number: `AM-${orderId.slice(-6)}`,
       reference: `AgentMart order ${orderId}`,
       currency_code: 'USD',
       note: 'AgentMart café restock invoice — created by the merchant from a completed agent order.',
-      payment_term: { term_type: 'DUE_ON_RECEIPT' },
+      // v10: NET_30 instead of DUE_ON_RECEIPT, so the invoice has a real
+      // 30-day payment term and the overdue check has a due date to work
+      // with. PayPal returns no due_date field on the invoice resource,
+      // so the server stores dueDate = created + 30 days locally.
+      payment_term: { term_type: 'NET_30' },
     },
-    invoicer: { name: { given_name: 'AgentMart', surname: 'Merchant' }, email_address: 'merchant@agentmart.example' },
+    // No invoicer object on purpose (v10 probe 2026-11-05): PayPal then
+    // defaults the invoicer to the API caller. Sending an explicit
+    // invoicer email fails send with 422 USER_NOT_FOUND unless that
+    // email is the PayPal account that owns the app — the old hardcoded
+    // merchant@agentmart.example meant "Send invoice" never worked.
     primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
     items: rec.items.map((i) => ({
       name: i.name.slice(0, 200),
@@ -627,10 +668,38 @@ async function createPayPalInvoice(orderId, recipientEmail) {
   const inv = await res.json();
   const href = (inv.links || []).find((l) => l.rel === 'self')?.href || '';
   const localId = `inv-${inv.id}`;
-  const stored = { orderId, invoiceId: inv.id, status: inv.status || 'DRAFT', recipient: recipientEmail, total: rec.total, createdAt: new Date().toISOString(), invoiceUrl: href };
+  const stored = { orderId, invoiceId: inv.id, status: inv.status || 'DRAFT', recipient: recipientEmail, total: rec.total, createdAt, invoiceUrl: href, dueDate: addDays(createdAt.slice(0, 10), 30), lastRemindedAt: null };
   invoices.set(localId, stored);
   saveInvoice(localId, stored);
   return stored;
+}
+
+// v10: remind the payer about a SENT invoice — POST
+// /v2/invoicing/invoices/{invoice_id}/remind with a notification object.
+// PayPal answers 204 (no body). Verified on sandbox 2026-11-05: remind on
+// a DRAFT invoice fails with 422 CANNOT_REMIND_INVOICE, so callers must
+// validate status SENT first (the route and the agent tool both do).
+async function remindPayPalInvoice(invoiceId) {
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v2/invoicing/invoices/${invoiceId}/remind`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notification: { subject: `Reminder: Payment due for invoice ${invoiceId}`, note: 'This is a friendly reminder from AgentMart — your café restock invoice is still unpaid. Please pay before the due date.', send_to_recipient: true, send_to_invoicer: false } }),
+  });
+  if (!res.ok) throw new Error(`PayPal remind invoice failed (${res.status}): ${await res.text()}`);
+  for (const [id, rec] of invoices) {
+    if (rec.invoiceId === invoiceId) { rec.lastRemindedAt = new Date().toISOString(); saveInvoice(id, rec); }
+  }
+  return { invoiceId, remindedAt: new Date().toISOString() };
+}
+
+// Overdue invoices: SENT invoices whose due date has passed. Pure
+// function (testable): list is [{ invoiceId, status, dueDate, ... }].
+function overdueInvoices(list, today = new Date().toISOString().slice(0, 10)) {
+  return list
+    .filter((r) => r.status === 'SENT' && r.dueDate && r.dueDate < today)
+    .map((r) => ({ ...r, daysOverdue: Math.floor((new Date(`${today}T00:00:00Z`) - new Date(`${r.dueDate}T00:00:00Z`)) / 86400000) }))
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 }
 
 async function sendPayPalInvoice(invoiceId) {
@@ -1071,7 +1140,10 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'check_stock', description: 'Check café inventory: stock on hand, days left at current usage, and LOW/OUT alerts. Use when the user asks what they are running out of.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'smart_restock', description: 'Build a restock cart from the items that will run out soon, sized by burn rate, and create the PayPal checkout in one step. Use when the user asks to restock before running out.', parameters: { type: 'object', properties: { budget: { type: 'number' } } } } },
   { type: 'function', function: { name: 'check_prices', description: 'Check supplier price history: current price, change over 3 months and 1 month, and which prices crept up more than 5%. Use when the user asks about prices going up.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'check_price_drops', description: 'Check which supplier prices DROPPED more than 5% in 3 months — a buying opportunity: smart restock already buys at the current lower price. Use when the user asks about prices going down or getting cheaper.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'check_payables', description: 'Check what the café owes suppliers: unpaid payables per supplier, amounts, due dates and overdue flags. Use when the user asks what they owe.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'check_overdue_invoices', description: 'Check overdue money: SENT PayPal invoices past their due date (with days overdue) and unpaid supplier payables past their due date. Use when the user asks what is overdue or past due.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'remind_invoice', description: 'Send a PayPal payment reminder for a SENT invoice (by invoice id, or the most overdue SENT invoice when omitted). Only SENT invoices can be reminded. Use when the user asks to remind, nudge or chase a customer about an unpaid invoice.', parameters: { type: 'object', properties: { invoiceId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'check_savings', description: 'Check how much the agent has saved the café: total dollars saved by buying from cheaper alternate suppliers, stock-outs prevented, and number of captured orders. Use when the user asks how much you have saved them.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_restock_plan', description: 'Run the active weekly restock plan (or the named plan): smart restock within the plan budget and create the PayPal checkout. Use when the user asks to run their weekly restock.', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
   { type: 'function', function: { name: 'create_subscription', description: 'Set up a weekly restock subscription (PayPal Subscriptions): size this week\'s restock box within the budget, create the weekly billing plan and subscription, and return the PayPal approval URL. Use when the user asks to subscribe or set up a weekly restock subscription.', parameters: { type: 'object', properties: { budget: { type: 'number' } } } } },
@@ -1081,7 +1153,7 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'check_recent_events', description: 'List recent PayPal webhook events received by the server (subscription activated/cancelled, invoice paid, order approved, sale completed) with their time and whether they were handled. Use when the user asks about recent payments or webhook events.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'revise_subscription', description: 'Revise an ACTIVE weekly restock subscription to a new weekly amount (or re-size the box from today\'s burn rate when no amount is given): create the new billing plan and revise the subscription on PayPal. A price rise needs the buyer to approve via the returned link; a price drop applies at once. Use when the user asks to revise or change their subscription or weekly box price.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' }, amount: { type: 'number' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks about prices going down or getting cheaper, call check_price_drops first and name the items that dropped more than 5% in 3 months — a falling price is a good time to stock up, and smart restock already buys at the current lower price. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks what is overdue or past due, call check_overdue_invoices first and list the overdue SENT invoices (with days overdue) and the overdue payables. When the user asks to remind, nudge or chase a customer about an unpaid invoice, call remind_invoice once (with the invoice id from their message when given, otherwise the most overdue SENT invoice) and confirm the reminder was sent — only SENT invoices can be reminded, so if there is none, say so instead of inventing one. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -1144,11 +1216,37 @@ async function executeLlmTool(session, name, args) {
   if (name === 'check_prices') {
     return { prices: PRODUCTS.map((p) => priceTrend(p)) };
   }
+  if (name === 'check_price_drops') {
+    return { drops: PRODUCTS.map((p) => priceTrend(p)).filter((t) => t.drop).sort((a, b) => a.changePct3mo - b.changePct3mo) };
+  }
   if (name === 'check_payables') {
     const today = new Date().toISOString().slice(0, 10);
     const list = [...payables.entries()].map(([id, r]) => ({ id, ...r, overdue: r.status === 'UNPAID' && r.dueDate < today })).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
     const unpaid = list.filter((r) => r.status === 'UNPAID');
     return { payables: list, totalUnpaid: Math.round(unpaid.reduce((s, r) => s + r.amount, 0) * 100) / 100, overdue: unpaid.filter((r) => r.overdue) };
+  }
+  if (name === 'check_overdue_invoices') {
+    const today = new Date().toISOString().slice(0, 10);
+    const overdueInv = overdueInvoices([...invoices.values()], today);
+    const overduePay = [...payables.entries()]
+      .map(([id, r]) => ({ id, ...r, overdue: r.status === 'UNPAID' && r.dueDate < today }))
+      .filter((r) => r.overdue);
+    return { overdueInvoices: overdueInv, overduePayables: overduePay };
+  }
+  if (name === 'remind_invoice') {
+    const today = new Date().toISOString().slice(0, 10);
+    let rec = null;
+    if (args.invoiceId) {
+      rec = [...invoices.values()].find((r) => r.invoiceId === args.invoiceId || `inv-${r.invoiceId}` === args.invoiceId) || null;
+      if (!rec) return { error: 'NOT_FOUND', message: `No invoice ${args.invoiceId} in this demo.` };
+    } else {
+      const overdue = overdueInvoices([...invoices.values()], today);
+      rec = overdue[0] || [...invoices.values()].find((r) => r.status === 'SENT') || null;
+      if (!rec) return { message: 'No SENT invoice to remind — create and send an invoice first.' };
+    }
+    if (rec.status !== 'SENT') return { error: 'INVOICE_NOT_SENT', message: `Invoice ${rec.invoiceId} is ${rec.status}, not SENT — only a SENT invoice can be reminded. Send it first.` };
+    const out = await remindPayPalInvoice(rec.invoiceId);
+    return { invoiceId: rec.invoiceId, status: 'SENT', remindedAt: out.remindedAt, message: `Reminder sent to ${rec.recipient || 'the customer'} for invoice ${rec.invoiceId} (${money(rec.total)}, due ${rec.dueDate || '—'}).` };
   }
   if (name === 'create_subscription') {
     const budget = typeof args.budget === 'number' && args.budget > 0 ? args.budget : 60;
@@ -1262,6 +1360,36 @@ async function runAgent(session, rawMessage) {
       ? `\n\n⚠️ Running low: ${low.map((r) => `${r.name} (~${r.daysLeft} days)`).join(', ')}. Say "smart restock" and I will order exactly what you need before you run out.`
       : '\n\nEverything is above its reorder point. Say "smart restock" any time and I will double-check.';
     return { reply: `Here is your stock:\n${lines}${warn}` };
+  }
+
+  // Overdue + reminders (v10): "what is overdue?" / "remind the customer
+  // about invoice …". Runs BEFORE the payables branch below, whose
+  // "what.*due" pattern would otherwise catch "what is overdue".
+  if (/(overdue|past due|late payment|quá hạn|qua han)/.test(msg) && !/remind|nudge|chase/.test(msg)) {
+    const today = new Date().toISOString().slice(0, 10);
+    const overdueInv = overdueInvoices([...invoices.values()], today);
+    const overduePay = [...payables.entries()].map(([id, r]) => ({ id, ...r })).filter((r) => r.status === 'UNPAID' && r.dueDate < today);
+    if (!overdueInv.length && !overduePay.length) return { reply: 'Nothing is overdue — no SENT invoice is past its due date and no payable is past due.' };
+    const lines = [];
+    if (overdueInv.length) lines.push(`Overdue invoices:\n${overdueInv.map((r) => `${r.invoiceId} — ${money(r.total)} to ${r.recipient || 'customer'}, due ${r.dueDate} (${r.daysOverdue} day(s) overdue)`).join('\n')}`);
+    if (overduePay.length) lines.push(`Overdue payables:\n${overduePay.map((r) => `${r.supplier} — ${money(r.amount)}, due ${r.dueDate}`).join('\n')}`);
+    return { reply: `${lines.join('\n\n')}${overdueInv.length ? '\n\nSay "remind the customer about the invoice" and I will send a PayPal payment reminder.' : ''}` };
+  }
+  if (/(remind|nudge|chase).*(invoice|payment|customer|payer)|send.*(payment )?reminder|nhắc.*(hóa đơn|hoa don|khách|khach)/.test(msg)) {
+    const idMatch = message.match(/\bINV2-[A-Z0-9-]+\b/);
+    const today = new Date().toISOString().slice(0, 10);
+    let rec = null;
+    if (idMatch) {
+      rec = [...invoices.values()].find((r) => r.invoiceId === idMatch[0]) || null;
+      if (!rec) return { reply: `I could not find invoice ${idMatch[0]} in this demo.` };
+    } else {
+      const overdue = overdueInvoices([...invoices.values()], today);
+      rec = overdue[0] || [...invoices.values()].find((r) => r.status === 'SENT') || null;
+      if (!rec) return { reply: 'No SENT invoice to remind — create an invoice from an order and send it first, then I can remind the customer.' };
+    }
+    if (rec.status !== 'SENT') return { reply: `Invoice ${rec.invoiceId} is ${rec.status}, not SENT — only a SENT invoice can be reminded. Send it first.` };
+    await remindPayPalInvoice(rec.invoiceId);
+    return { reply: `Reminder sent to ${rec.recipient || 'the customer'} for invoice ${rec.invoiceId} (${money(rec.total)}, due ${rec.dueDate || '—'}). PayPal will email them about the unpaid invoice.` };
   }
 
   // Payables: "what do I owe?" / "nợ bao nhiêu?"
@@ -1403,6 +1531,18 @@ async function runAgent(session, rawMessage) {
     return { reply: `Done — weekly restock plan "${plan.name}" created: every ${DAY_NAMES[day]}, budget ${money(budget)}. Next run: ${planView(plan).nextRun}. Say "run my weekly restock" any time and I will execute it. (Plans run when you ask — there is no background cron on the free demo host.)` };
   }
 
+  // Price drops (v10): "did any prices go down?" — must run BEFORE the
+  // creep branch below, which also matches "did any prices...".
+  if (/(price.*(down|drop|dropped|fell|fall|decrease|decreased|lower|cheaper)|did.*prices? (go )?down|any (price )?drops|giá.*(giảm|giam|xuống|xuong))/.test(msg)) {
+    const trends = PRODUCTS.map((p) => priceTrend(p));
+    const drops = trends.filter((t) => t.drop).sort((a, b) => a.changePct3mo - b.changePct3mo);
+    const lines = trends.map((t) => `${t.emoji} ${t.name} — ${money(t.current)} (${t.changePct3mo >= 0 ? '+' : ''}${t.changePct3mo}% in 3 months${t.drop ? ', 📉 drop' : ''})`).join('\n');
+    const note = drops.length
+      ? `\n\n📉 Prices down more than 5% in 3 months: ${drops.map((t) => `${t.name} ${t.changePct3mo}%`).join(', ')}. Biggest fall is ${drops[0].name} — a good time to stock up, and a smart restock already buys at the current lower price.`
+      : '\n\nNo supplier price has dropped more than 5% in 3 months.';
+    return { reply: `Supplier prices (demo history, Aug–Nov 2026):\n${lines}${note}` };
+  }
+
   // Price creep: "did any prices go up?" / "giá có tăng không?"
   if (/(price.*(up|rose|ris|increase|creep|higher)|giá.*(tăng|tang|len)|did.*price|price check|supplier.*price)/.test(msg)) {
     const trends = PRODUCTS.map((p) => priceTrend(p));
@@ -1511,7 +1651,7 @@ async function runAgent(session, rawMessage) {
 
   // Greeting / help
   if (/(hello|hi|hey|help|xin chào|chao)/.test(msg)) {
-    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Any new payments?"\n• "Revise my subscription"\n• "Checkout"' };
+    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $35"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "Did any prices go down?"\n• "What do I owe suppliers?"\n• "What is overdue?"\n• "Remind the customer about the invoice"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Any new payments?"\n• "Revise my subscription"\n• "Checkout"' };
   }
 
   // Default: treat as a search
@@ -1527,7 +1667,7 @@ app.use('/vendor/ag-grid-community', express.static(path.join(__dirname, 'node_m
 app.use('/vendor/ag-grid-community/styles', express.static(path.join(__dirname, 'node_modules', 'ag-grid-community', 'styles')));
 
 app.get('/health', (req, res) => res.json({ ok: true, paypalConfigured, llmConfigured }));
-app.get('/api/config', (req, res) => res.json({ paypalConfigured, env: PAYPAL_ENV, llmConfigured, llmModel: LLM_MODEL, engine: llmConfigured ? `llm:${LLM_MODEL}` : 'deterministic' }));
+app.get('/api/config', (req, res) => res.json({ paypalConfigured, env: PAYPAL_ENV, llmConfigured, llmModel: LLM_MODEL, engine: llmConfigured ? `llm:${LLM_MODEL}` : 'deterministic', cafe: CAFE.name, cafeLocation: CAFE.location }));
 app.get('/api/products', (req, res) => res.json(PRODUCTS));
 app.get('/api/orders', (req, res) => {
   const session = req.query.session ? String(req.query.session) : null;
@@ -1763,6 +1903,23 @@ app.post('/api/invoices/:id/send', async (req, res) => {
     res.status(502).json({ error: 'PAYPAL_ERROR', message: e.message });
   }
 });
+// v10: remind the payer about a SENT invoice (PayPal Invoicing remind
+// API). Only SENT invoices can be reminded — PayPal answers 422
+// CANNOT_REMIND_INVOICE for DRAFT, so the status is validated here,
+// before any PayPal call, with a clear error.
+app.post('/api/invoices/:id/remind', async (req, res) => {
+  if (!paypalConfigured) return res.status(503).json({ error: 'PAYPAL_NOT_CONFIGURED' });
+  const rec = invoices.get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'NOT_FOUND' });
+  if (rec.status !== 'SENT') return res.status(400).json({ error: 'INVOICE_NOT_SENT', message: `Only a SENT invoice can be reminded (this one is ${rec.status}). Send it first.` });
+  try {
+    const out = await remindPayPalInvoice(rec.invoiceId);
+    res.json({ id: req.params.id, invoiceId: rec.invoiceId, status: 'SENT', ...out });
+  } catch (e) {
+    console.error(e);
+    res.status(502).json({ error: 'PAYPAL_ERROR', message: e.message });
+  }
+});
 app.post('/api/invoices/:id/refresh', async (req, res) => {
   if (!paypalConfigured) return res.status(503).json({ error: 'PAYPAL_NOT_CONFIGURED' });
   const rec = invoices.get(req.params.id);
@@ -1881,4 +2038,4 @@ if (require.main === module) {
     registerPayPalWebhook().catch((e) => console.error('webhook: registration failed:', e.message));
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription, invoices, overdueInvoices, remindPayPalInvoice, CAFE };

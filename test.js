@@ -42,15 +42,15 @@ test('catalog has 8 café products', async () => {
 });
 
 test('searchProducts respects max price', () => {
-  const hits = searchProducts('coffee', 20);
+  const hits = searchProducts('coffee', 35);
   assert.ok(hits.length > 0);
-  assert.ok(hits.every((p) => p.price <= 20));
+  assert.ok(hits.every((p) => p.price <= 35));
 });
 
 test('agent search does not need PayPal', async () => {
   const { status, data } = await api('/api/agent', {
     method: 'POST',
-    body: JSON.stringify({ session: 'test-unit', message: 'Show me coffee under $20' }),
+    body: JSON.stringify({ session: 'test-unit', message: 'Show me coffee under $35' }),
   });
   assert.equal(status, 200);
   assert.match(data.reply, /Arabica|Robusta/);
@@ -102,15 +102,17 @@ test('smart restock plan fits the budget', () => {
 
 test('smart restock buys oat milk from the cheaper alternate supplier', () => {
   // Runs on seeded inventory (before the swap test simulates days away).
+  // v10 Blue Bottle seed: matcha ×1 at $40.50 + oat-milk ×3 at the
+  // alternate $5.99 (vs $6.39) = $58.47, saved $1.20.
   const { smartRestockPlan } = require('./server');
   const { plan, total, saved } = smartRestockPlan(60);
   const oat = plan.find((p) => p.id === 'oat-milk');
   assert.ok(oat);
-  assert.equal(oat.price, 14);
+  assert.equal(oat.price, 5.99);
   assert.equal(oat.supplier, 'Green Valley Farms');
   assert.equal(oat.supplierIsAlt, true);
-  assert.equal(total, 56);
-  assert.equal(saved, 2);
+  assert.equal(total, 58.47);
+  assert.equal(saved, 1.2);
 });
 
 test('agent answers what is running out', async () => {
@@ -189,20 +191,35 @@ test('bestSupplier picks the cheaper alternate within lead-time tolerance', () =
 
 test('priceTrend flags creep above 5% in 3 months', () => {
   const { priceTrend } = require('./server');
-  const arabica = priceTrend({ id: 'arabica-beans', name: 'Arabica Coffee Beans · 1kg', emoji: '☕', tag: 'coffee', price: 18 });
-  assert.equal(arabica.changePct3mo, 9.1);
+  // v10 Blue Bottle seed: blend beans $23.40 → $25.50 = +9.0%.
+  const arabica = priceTrend({ id: 'arabica-beans', name: 'Blue Bottle Blend Beans · Arabica 12 oz', emoji: '☕', tag: 'coffee', price: 25.50 });
+  assert.equal(arabica.changePct3mo, 9.0);
   assert.equal(arabica.creep, true);
-  const pourover = priceTrend({ id: 'pourover-set', name: 'Ceramic Pour-Over Set', emoji: '🍶', tag: 'gear', price: 32 });
+  const pourover = priceTrend({ id: 'pourover-set', name: 'Blue Bottle Dripper', emoji: '🍶', tag: 'gear', price: 28 });
   assert.equal(pourover.changePct3mo, 0);
   assert.equal(pourover.creep, false);
 });
 
+test('priceTrend flags drops below -5% in 3 months (v10)', () => {
+  const { priceTrend } = require('./server');
+  // Cold brew $6.49 → $5.79 = -10.8%; instant coffee $3.95 → $3.50 = -11.4%.
+  const cold = priceTrend({ id: 'coldbrew-bottle', name: 'Blue Bottle Bright Cold Brew · 8 oz', emoji: '🧊', tag: 'gear', price: 5.79 });
+  assert.equal(cold.changePct3mo, -10.8);
+  assert.equal(cold.drop, true);
+  assert.equal(cold.creep, false);
+  const instant = priceTrend({ id: 'instant-coffee', name: 'Blue Bottle Craft Instant Coffee', emoji: '⚡', tag: 'pantry', price: 3.50 });
+  assert.equal(instant.changePct3mo, -11.4);
+  assert.equal(instant.drop, true);
+  const arabica = priceTrend({ id: 'arabica-beans', name: 'Blue Bottle Blend Beans · Arabica 12 oz', emoji: '☕', tag: 'coffee', price: 25.50 });
+  assert.equal(arabica.drop, false);
+});
+
 test('cart keeps a supplier price override per line', () => {
   const { cartAdd, cartView } = require('./server');
-  cartAdd('test-pricing', 'oat-milk', 1, { price: 14, supplier: 'Green Valley Farms', leadTimeDays: 3 });
+  cartAdd('test-pricing', 'oat-milk', 1, { price: 5.99, supplier: 'Green Valley Farms', leadTimeDays: 3 });
   const view = cartView('test-pricing');
-  assert.equal(view.total, 14);
-  assert.equal(view.items[0].price, 14);
+  assert.equal(view.total, 5.99);
+  assert.equal(view.items[0].price, 5.99);
   assert.equal(view.items[0].supplier, 'Green Valley Farms');
 });
 
@@ -212,8 +229,19 @@ test('prices endpoint lists all products with best buy', async () => {
   assert.equal(data.length, 8);
   const oat = data.find((r) => r.id === 'oat-milk');
   assert.equal(oat.bestSupplier, 'Green Valley Farms');
-  assert.equal(oat.bestPrice, 14);
+  assert.equal(oat.bestPrice, 5.99);
   assert.equal(oat.creep, true);
+});
+
+test('prices endpoint flags drops (v10)', async () => {
+  const { data } = await api('/api/prices');
+  const cold = data.find((r) => r.id === 'coldbrew-bottle');
+  assert.equal(cold.drop, true);
+  assert.equal(cold.changePct3mo, -10.8);
+  const instant = data.find((r) => r.id === 'instant-coffee');
+  assert.equal(instant.drop, true);
+  const arabica = data.find((r) => r.id === 'arabica-beans');
+  assert.equal(arabica.drop, false);
 });
 
 test('agent answers the price creep question', async () => {
@@ -224,6 +252,16 @@ test('agent answers the price creep question', async () => {
   assert.equal(status, 200);
   assert.match(data.reply, /Arabica/);
   assert.match(data.reply, /creep/i);
+});
+
+test('agent answers the price drop question (v10)', async () => {
+  const { status, data } = await api('/api/agent', {
+    method: 'POST',
+    body: JSON.stringify({ session: 'test-unit', message: 'Did any prices go down?' }),
+  });
+  assert.equal(status, 200);
+  assert.match(data.reply, /Cold Brew|Instant Coffee/);
+  assert.match(data.reply, /down/i);
 });
 
 test('expectedDeliveryDate uses the longest lead time', () => {
@@ -244,19 +282,19 @@ test('payablesForOrder splits per supplier with terms-based due dates', () => {
   const rec = {
     expectedDelivery: '2026-11-09',
     items: [
-      { id: 'matcha', name: 'Ceremonial Matcha · 500g', qty: 2, price: 21, supplier: 'Kyoto Tea Imports', leadTimeDays: 4 },
-      { id: 'oat-milk', name: 'Oat Milk · 1L × 6', qty: 1, price: 14, supplier: 'Green Valley Farms', leadTimeDays: 3 },
+      { id: 'matcha', name: 'Blue Bottle Craft Matcha · 100 g', qty: 2, price: 40.50, supplier: 'Kyoto Tea Imports', leadTimeDays: 4 },
+      { id: 'oat-milk', name: 'Oatly Barista Oat Milk · 32 oz', qty: 1, price: 5.99, supplier: 'Green Valley Farms', leadTimeDays: 3 },
     ],
   };
   const rows = payablesForOrder(rec, 'TESTORDER123');
   assert.equal(rows.length, 2);
   const kyoto = rows.find((r) => r.supplier === 'Kyoto Tea Imports');
-  assert.equal(kyoto.amount, 42);
+  assert.equal(kyoto.amount, 81);
   assert.equal(kyoto.terms, 'Net 7');
   assert.equal(kyoto.dueDate, '2026-11-16');
   assert.equal(kyoto.status, 'UNPAID');
   const green = rows.find((r) => r.supplier === 'Green Valley Farms');
-  assert.equal(green.amount, 14);
+  assert.equal(green.amount, 5.99);
   assert.equal(green.dueDate, '2026-11-16');
 });
 
@@ -392,14 +430,15 @@ test('adjust endpoint validates input and sets stock', async () => {
 
 test('overstocked perishable spoils on simulate-day', async () => {
   // Oat-milk is at 16 (max 12) from the adjust test above.
+  // v10: one spoiled oat-milk carton costs $6.39 (Blue Bottle seed price).
   const { status, data } = await api('/api/inventory/simulate-day', { method: 'POST', body: JSON.stringify({}) });
   assert.equal(status, 200);
   assert.equal(data.spoiled.length, 1);
   assert.equal(data.spoiled[0].id, 'oat-milk');
   assert.equal(data.spoiled[0].qty, 1);
-  assert.equal(data.spoiled[0].cost, 16);
+  assert.equal(data.spoiled[0].cost, 6.39);
   const w = await api('/api/waste');
-  assert.equal(w.data.totalCost, 16);
+  assert.equal(w.data.totalCost, 6.39);
   assert.equal(w.data.totalQty, 1);
   const inv = await api('/api/inventory');
   const oat = inv.data.find((r) => r.id === 'oat-milk');
@@ -412,7 +451,7 @@ test('agent answers the waste question', async () => {
     body: JSON.stringify({ session: 'test-unit', message: 'How much am I wasting?' }),
   });
   assert.equal(status, 200);
-  assert.match(data.reply, /\$16\.00/);
+  assert.match(data.reply, /\$6\.39/);
   assert.match(data.reply, /Overstocked/);
 });
 
@@ -518,7 +557,51 @@ test('agent reports no webhook events when none arrived', async () => {
 test('v9 revise_subscription tool is registered for the LLM', () => {
   const { llmTools } = require('./server');
   assert.ok(llmTools.find((t) => t.function.name === 'revise_subscription'));
-  assert.equal(llmTools.length, 18);
+  assert.equal(llmTools.length, 21);
+});
+
+test('v10 price-drop, overdue and remind tools are registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  for (const name of ['check_price_drops', 'check_overdue_invoices', 'remind_invoice']) {
+    assert.ok(llmTools.find((t) => t.function.name === name), `${name} missing`);
+  }
+});
+
+test('overdueInvoices flags SENT invoices past their due date (v10)', () => {
+  const { overdueInvoices } = require('./server');
+  const list = [
+    { invoiceId: 'INV2-OLD', status: 'SENT', dueDate: '2026-10-20', total: 40.50 },
+    { invoiceId: 'INV2-NEW', status: 'SENT', dueDate: '2026-12-01', total: 10 },
+    { invoiceId: 'INV2-DRAFT', status: 'DRAFT', dueDate: '2026-10-01', total: 5 },
+    { invoiceId: 'INV2-PAID', status: 'PAID', dueDate: '2026-10-01', total: 5 },
+  ];
+  const overdue = overdueInvoices(list, '2026-11-05');
+  assert.equal(overdue.length, 1);
+  assert.equal(overdue[0].invoiceId, 'INV2-OLD');
+  assert.equal(overdue[0].daysOverdue, 16);
+});
+
+test('remind endpoint validates unknown ids and non-SENT invoices (v10)', async () => {
+  const missing = await api('/api/invoices/inv-NOPE/remind', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.data.error, 'NOT_FOUND');
+  // Seed a DRAFT invoice straight into the in-memory map (no PayPal call):
+  // the route must reject it before any PayPal call.
+  const { invoices } = require('./server');
+  invoices.set('inv-INV2-DRAFT1', { orderId: 'TEST', invoiceId: 'INV2-DRAFT1', status: 'DRAFT', recipient: 'a@b.co', total: 10, createdAt: '2026-11-05T00:00:00.000Z', invoiceUrl: '', dueDate: '2026-12-05', lastRemindedAt: null });
+  const draft = await api('/api/invoices/inv-INV2-DRAFT1/remind', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(draft.status, 400);
+  assert.equal(draft.data.error, 'INVOICE_NOT_SENT');
+});
+
+test('agent reports nothing overdue when no invoice is past due (v10)', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-unit', message: 'What is overdue?' }) });
+  assert.match(data.reply, /Nothing is overdue/);
+});
+
+test('agent remind intent reports no SENT invoice when none exists (v10)', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-unit', message: 'Remind the customer about the invoice' }) });
+  assert.match(data.reply, /No SENT invoice to remind/);
 });
 
 test('revise endpoint validates input and unknown subscriptions', async () => {
