@@ -483,7 +483,6 @@ test('agent reports no subscriptions when none exist', async () => {
 test('v8 check_recent_events tool is registered for the LLM', () => {
   const { llmTools } = require('./server');
   assert.ok(llmTools.find((t) => t.function.name === 'check_recent_events'));
-  assert.equal(llmTools.length, 17);
 });
 
 test('routeWebhookEvent maps every PayPal event type', () => {
@@ -514,6 +513,26 @@ test('webhook endpoint rejects unsigned and invalid events; list starts empty', 
 test('agent reports no webhook events when none arrived', async () => {
   const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-wh', message: 'Any new payments?' }) });
   assert.match(data.reply, /No PayPal webhook events have arrived yet/);
+});
+
+test('v9 revise_subscription tool is registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  assert.ok(llmTools.find((t) => t.function.name === 'revise_subscription'));
+  assert.equal(llmTools.length, 18);
+});
+
+test('revise endpoint validates input and unknown subscriptions', async () => {
+  const bad = await api('/api/subscriptions/I-NOPE/revise', { method: 'POST', body: JSON.stringify({ amount: -5 }) });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.data.error, 'INVALID_INPUT');
+  const missing = await api('/api/subscriptions/I-NOPE/revise', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.data.error, 'NOT_FOUND');
+});
+
+test('agent revise intent reports no ACTIVE subscription when none exist', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-revise', message: 'Revise my subscription' }) });
+  assert.match(data.reply, /No ACTIVE subscription to revise/);
 });
 
 test('demo reset restores seed stock and clears waste', async () => {

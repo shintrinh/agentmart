@@ -411,6 +411,7 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
         cellRenderer: (p) => {
           const id = p.data.id;
           const acts = [['refresh', 'Refresh'], ['fulfill', 'Fulfill box']];
+          if (p.data.status === 'ACTIVE') acts.push(['revise', 'Revise to current needs']);
           if (p.data.status === 'ACTIVE') acts.push(['suspend', 'Suspend']);
           if (p.data.status === 'SUSPENDED') acts.push(['activate', 'Activate']);
           if (p.data.status !== 'CANCELLED') acts.push(['cancel', 'Cancel']);
@@ -443,7 +444,13 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     const msg = document.getElementById('subMsg');
     msg.textContent = `${action}…`;
     const { ok, data: out } = await api(`/api/subscriptions/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: JSON.stringify({}) });
-    msg.textContent = ok ? (out.orderId ? `Fulfilled — PayPal order ${out.orderId} for ${money(out.total)}. Approve it on PayPal sandbox.` : `Subscription ${id} is now ${out.status || action + 'ed'}.`) : (out.message || 'Could not do that.');
+    if (ok && action === 'revise') {
+      if (!out.revised) msg.textContent = out.message;
+      else if (out.needsApproval) msg.innerHTML = `Revision proposed: ${money(out.oldAmount)} → ${money(out.proposedAmount)}/week — <a href="${out.approveUrl}" target="_blank" rel="noopener">approve the price change on PayPal sandbox</a>.`;
+      else msg.textContent = `Subscription revised: now ${money(out.newAmount)}/week (was ${money(out.oldAmount)}).`;
+    } else {
+      msg.textContent = ok ? (out.orderId ? `Fulfilled — PayPal order ${out.orderId} for ${money(out.total)}. Approve it on PayPal sandbox.` : `Subscription ${id} is now ${out.status || action + 'ed'}.`) : (out.message || 'Could not do that.');
+    }
     if (ok) loadAll();
   });
 

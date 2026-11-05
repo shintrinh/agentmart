@@ -733,6 +733,23 @@ async function refreshSubscription(id) {
   const sub = await res.json();
   rec.status = sub.status || rec.status;
   rec.nextBillingDate = sub.billing_info?.next_billing_time || rec.nextBillingDate;
+  // A revise approved by the buyer moves the subscription to the new plan;
+  // sync plan + amount from PayPal so the DB tells the truth after approval.
+  if (sub.plan_id && sub.plan_id !== rec.planId) {
+    const cached = [...subscriptionPlans.values()].find((p) => p.planId === sub.plan_id);
+    let amount = cached ? [...subscriptionPlans.entries()].find(([, p]) => p.planId === sub.plan_id)?.[0] : null;
+    if (amount == null) {
+      const planRes = await fetch(`${PAYPAL_BASE}/v1/billing/plans/${sub.plan_id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (planRes.ok) {
+        const plan = await planRes.json();
+        amount = Number(plan.billing_cycles?.[0]?.pricing_scheme?.fixed_price?.value || 0);
+      }
+    }
+    if (amount) {
+      rec.planId = sub.plan_id;
+      rec.amount = amount;
+    }
+  }
   saveSubscription(id, rec);
   return subscriptionView(id, rec);
 }
@@ -762,6 +779,49 @@ async function fulfillSubscription(id, session) {
   rec.lastFulfilledAt = new Date().toISOString();
   saveSubscription(id, rec);
   return { subscriptionId: id, plan, total, saved, expectedDelivery: order?.expectedDelivery, orderId: r.orderId, checkoutUrl: r.checkoutUrl, reply: r.reply };
+}
+
+async function reviseSubscription(id, newAmount) {
+  const rec = subscriptions.get(id);
+  if (!rec) throw new Error('NOT_FOUND');
+  if (rec.status !== 'ACTIVE') throw new Error('SUBSCRIPTION_NOT_ACTIVE');
+  // Default: re-size the box from today's burn rate with a generous budget so
+  // the true current need shows (capped per item by maxStock, as always).
+  let target = newAmount;
+  let box = null;
+  if (typeof target !== 'number' || !(target > 0)) {
+    const sized = smartRestockPlan(Math.max(rec.amount * 3, 60));
+    if (!sized.plan.length) return { subscriptionId: id, amount: rec.amount, revised: false, message: 'Nothing needs restocking right now — the box stays as it is.' };
+    target = sized.total;
+    box = sized.plan;
+  }
+  target = Math.round(target * 100) / 100;
+  if (target === rec.amount) return { subscriptionId: id, amount: rec.amount, revised: false, message: `The box already costs ${money(rec.amount)} at today's burn rate — no revise needed.` };
+  const oldAmount = rec.amount;
+  const planId = await ensureSubscriptionPlan(target);
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/billing/subscriptions/${id}/revise`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) throw new Error(`PayPal revise subscription failed (${res.status}): ${await res.text()}`);
+  const revised = await res.json();
+  const approveUrl = (revised.links || []).find((l) => l.rel === 'approve')?.href || '';
+  // A price drop applies at once; a price rise waits for the buyer to
+  // approve, so the DB keeps the old plan/amount until then (refresh or a
+  // webhook syncs it after approval).
+  if (!approveUrl) {
+    rec.planId = planId;
+    rec.amount = target;
+    if (box) rec.boxItems = box;
+  }
+  let status = rec.status;
+  try {
+    status = (await refreshSubscription(id)).status;
+  } catch { /* report the stored status */ }
+  saveSubscription(id, rec);
+  return { subscriptionId: id, oldAmount, newAmount: approveUrl ? oldAmount : target, proposedAmount: target, revised: true, needsApproval: Boolean(approveUrl), approveUrl, status, box: box || rec.boxItems };
 }
 
 /* ---------------------------------------------- PayPal webhooks (v8) */
@@ -1019,8 +1079,9 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'cancel_subscription', description: 'Cancel a weekly restock subscription on PayPal (by subscription id, or the latest one if omitted). Use when the user asks to cancel their subscription.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'fulfill_subscription', description: 'Fulfill this week\'s box for an ACTIVE weekly restock subscription: smart restock within the subscription amount and create the PayPal checkout. Use when the user asks to fulfill this week\'s subscription box.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'check_recent_events', description: 'List recent PayPal webhook events received by the server (subscription activated/cancelled, invoice paid, order approved, sale completed) with their time and whether they were handled. Use when the user asks about recent payments or webhook events.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'revise_subscription', description: 'Revise an ACTIVE weekly restock subscription to a new weekly amount (or re-size the box from today\'s burn rate when no amount is given): create the new billing plan and revise the subscription on PayPal. A price rise needs the buyer to approve via the returned link; a price drop applies at once. Use when the user asks to revise or change their subscription or weekly box price.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' }, amount: { type: 'number' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -1108,6 +1169,12 @@ async function executeLlmTool(session, name, args) {
   }
   if (name === 'check_recent_events') {
     return { events: recentWebhookEvents(10) };
+  }
+  if (name === 'revise_subscription') {
+    const id = args.subscriptionId || [...subscriptions.entries()].find(([, r]) => r.status === 'ACTIVE')?.[0];
+    if (!id) return { message: 'No ACTIVE subscription to revise — set one up and approve it on PayPal first.' };
+    const amount = typeof args.amount === 'number' && args.amount > 0 ? args.amount : undefined;
+    return reviseSubscription(id, amount);
   }
   return { error: 'UNKNOWN_TOOL' };
 }
@@ -1213,6 +1280,26 @@ async function runAgent(session, rawMessage) {
     const s = savingsSummary();
     if (!s.capturedOrders) return { reply: 'No captured orders yet, so no savings recorded. Run a smart restock and approve it — I will track every dollar the cheaper suppliers save you.' };
     return { reply: `Across ${s.capturedOrders} captured order(s), I have saved you ${money(s.totalSaved)} by buying from cheaper alternate suppliers, and prevented ${s.preventedStockouts} stock-out(s) by restocking before items ran out.` };
+  }
+
+  // Subscription revise (v9): "revise my subscription" / "change my weekly
+  // box" — re-size the box from today's burn rate and revise on PayPal.
+  // Must run BEFORE the v7 subscription block below, which also matches
+  // the word "subscription".
+  if (/(revise|change my (weekly )?box|change my subscription|update my subscription|đổi gói|doi goi)/.test(msg)) {
+    const idMatch = message.match(/\bI-[A-Z0-9]+\b/);
+    const id = idMatch?.[0] || [...subscriptions.entries()].find(([, r]) => r.status === 'ACTIVE')?.[0];
+    if (!id) return { reply: 'No ACTIVE subscription to revise — set one up and approve it on PayPal first.' };
+    const amountMatch = msg.match(/\$?\s*(\d+(?:\.\d+)?)/);
+    try {
+      const out = await reviseSubscription(id, amountMatch ? Number(amountMatch[1]) : undefined);
+      if (!out.revised) return { reply: out.message };
+      if (out.needsApproval) return { reply: `Revision proposed: weekly box ${money(out.oldAmount)} → ${money(out.proposedAmount)} on approval. The price rise needs your approval:\n${out.approveUrl}` };
+      return { reply: `Subscription revised: weekly box is now ${money(out.newAmount)} (was ${money(out.oldAmount)}). The new price applies at once — box: ${out.box.map((i) => `${i.qty}× ${i.name}`).join(', ')}.` };
+    } catch (e) {
+      if (e.message === 'SUBSCRIPTION_NOT_ACTIVE') return { reply: 'That subscription is not ACTIVE, so it cannot be revised — approve it on PayPal first.' };
+      throw e;
+    }
   }
 
   // Subscriptions (v7): "set up a weekly subscription" / "what subscriptions
@@ -1424,7 +1511,7 @@ async function runAgent(session, rawMessage) {
 
   // Greeting / help
   if (/(hello|hi|hey|help|xin chào|chao)/.test(msg)) {
-    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Any new payments?"\n• "Checkout"' };
+    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Any new payments?"\n• "Revise my subscription"\n• "Checkout"' };
   }
 
   // Default: treat as a search
@@ -1547,6 +1634,19 @@ app.post('/api/subscriptions/:id/fulfill', async (req, res) => {
     if (e.message === 'SUBSCRIPTION_NOT_ACTIVE') return res.status(400).json({ error: 'SUBSCRIPTION_NOT_ACTIVE', message: 'Only an ACTIVE subscription can be fulfilled.' });
     console.error(e);
     res.status(502).json({ error: 'FULFILL_FAILED', message: e.message });
+  }
+});
+app.post('/api/subscriptions/:id/revise', async (req, res) => {
+  const b = Number(req.body?.amount);
+  const amount = req.body?.amount === undefined ? undefined : (Number.isFinite(b) && b > 0 ? b : null);
+  if (amount === null) return res.status(400).json({ error: 'INVALID_INPUT', message: 'amount must be a number above 0.' });
+  try {
+    res.json(await reviseSubscription(req.params.id, amount));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    if (e.message === 'SUBSCRIPTION_NOT_ACTIVE') return res.status(400).json({ error: 'SUBSCRIPTION_NOT_ACTIVE', message: 'Only an ACTIVE subscription can be revised.' });
+    console.error(e);
+    res.status(502).json({ error: 'REVISE_FAILED', message: e.message });
   }
 });
 
@@ -1781,4 +1881,4 @@ if (require.main === module) {
     registerPayPalWebhook().catch((e) => console.error('webhook: registration failed:', e.message));
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription };
