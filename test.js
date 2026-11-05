@@ -450,7 +450,6 @@ test('v7 subscription tools are registered for the LLM', () => {
   for (const name of ['create_subscription', 'check_subscriptions', 'cancel_subscription', 'fulfill_subscription']) {
     assert.ok(llmTools.find((t) => t.function.name === name), `${name} missing`);
   }
-  assert.equal(llmTools.length, 16);
 });
 
 test('subscriptionView formats a stored subscription', () => {
@@ -479,6 +478,42 @@ test('subscriptions list starts empty; bad budget rejected; unknown ids 404', as
 test('agent reports no subscriptions when none exist', async () => {
   const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-subs', message: 'What subscriptions do I have?' }) });
   assert.match(data.reply, /No subscriptions yet/);
+});
+
+test('v8 check_recent_events tool is registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  assert.ok(llmTools.find((t) => t.function.name === 'check_recent_events'));
+  assert.equal(llmTools.length, 17);
+});
+
+test('routeWebhookEvent maps every PayPal event type', () => {
+  const { routeWebhookEvent } = require('./server');
+  const sub = { event_type: 'BILLING.SUBSCRIPTION.ACTIVATED', resource: { id: 'I-X', status: 'ACTIVE', billing_info: { next_billing_time: '2026-11-12T00:00:00Z' } } };
+  assert.deepEqual(routeWebhookEvent(sub), { kind: 'subscription', id: 'I-X', status: 'ACTIVE', nextBillingDate: '2026-11-12T00:00:00Z', summary: 'Subscription I-X → ACTIVE' });
+  assert.equal(routeWebhookEvent({ event_type: 'BILLING.SUBSCRIPTION.CANCELLED', resource: { id: 'I-X', status: 'CANCELLED' } }).status, 'CANCELLED');
+  assert.equal(routeWebhookEvent({ event_type: 'BILLING.SUBSCRIPTION.PAYMENT.FAILED', resource: { id: 'I-X' } }).kind, 'subscription-payment-failed');
+  assert.equal(routeWebhookEvent({ event_type: 'INVOICING.INVOICE.PAID', resource: { id: 'INV2-A' } }).kind, 'invoice-paid');
+  assert.equal(routeWebhookEvent({ event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: '9SH1' } }).kind, 'order-approved');
+  assert.equal(routeWebhookEvent({ event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: '9SH1' } }).kind, 'order-completed');
+  assert.equal(routeWebhookEvent({ event_type: 'PAYMENT.SALE.COMPLETED', resource: { id: 'S-1', billing_agreement_id: 'I-X' } }).subscriptionId, 'I-X');
+  assert.equal(routeWebhookEvent({ event_type: 'SOMETHING.ELSE', resource: {} }).kind, 'unknown');
+});
+
+test('webhook endpoint rejects unsigned and invalid events; list starts empty', async () => {
+  const list = await api('/api/webhook-events');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.data, []);
+  const noSig = await api('/api/webhooks/paypal', { method: 'POST', body: JSON.stringify({ id: 'WH-1', event_type: 'BILLING.SUBSCRIPTION.ACTIVATED', resource: { id: 'I-X' } }) });
+  assert.equal(noSig.status, 401);
+  assert.equal(noSig.data.error, 'MISSING_SIGNATURE');
+  const bad = await api('/api/webhooks/paypal', { method: 'POST', body: JSON.stringify({ hello: 'world' }) });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.data.error, 'INVALID_EVENT');
+});
+
+test('agent reports no webhook events when none arrived', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-wh', message: 'Any new payments?' }) });
+  assert.match(data.reply, /No PayPal webhook events have arrived yet/);
 });
 
 test('demo reset restores seed stock and clears waste', async () => {

@@ -20,11 +20,11 @@ orders above that max.
 AgentMart is a working café-restocking store with two ways to buy and one
 merchant view:
 1. **Agent path (the point of the project):** chat with the shopping agent,
-   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over sixteen tools
+   driven by a real LLM (Muse Spark Open via Baseten, fallback Fireworks, tool-calling) over seventeen tools
    (`search_products`, `add_to_cart`, `remove_from_cart`, `view_cart`, `create_checkout`,
    `order_status`, `check_stock`, `smart_restock`, `check_prices`, `check_payables`,
    `check_savings`, `run_restock_plan`, `create_subscription`, `check_subscriptions`,
-   `cancel_subscription`, `fulfill_subscription`). It checks inventory
+   `cancel_subscription`, `fulfill_subscription`, `check_recent_events`). It checks inventory
    (stock on hand, days left at current usage, LOW/OUT alerts), sizes a
    smart restock from burn rate × (supplier lead time + 7 days of cover)
    inside a budget in a single tool call, creates a PayPal Checkout order
@@ -75,7 +75,10 @@ so the second charge lands 7 days out rather than inside the demo.
 - PayPal integration: OAuth client-credentials + Orders API v2, server-side
   create/capture, return/cancel URL flow; Invoicing API v2 for merchant
   invoices; Subscriptions API (Catalog Products → Billing Plans → Subscriptions:
-  create / get / suspend / activate / cancel) for the weekly restock box.
+  create / get / suspend / activate / cancel) for the weekly restock box;
+  Notifications / Webhooks API — the server self-registers its webhook on
+  boot, verifies every event signature against PayPal, and routes events
+  (subscription status sync, invoice → PAID, order auto-capture on approval).
 - The agent calls Muse Spark Open (Baseten first, Fireworks fallback, OpenAI-compatible Chat
   Completions) with tool definitions; a deterministic intent engine over the
   same tools is the fallback when no LLM key is set, and every reply names
@@ -120,7 +123,7 @@ so the second charge lands 7 days out rather than inside the demo.
   Render health check.
 
 ## Tools used (for the "Tools" field)
-- PayPal Developer Platform — Checkout / Orders API v2, Invoicing API v2, Subscriptions API (Catalog Products, Billing Plans, Subscriptions), sandbox environment
+- PayPal Developer Platform — Checkout / Orders API v2, Invoicing API v2, Subscriptions API (Catalog Products, Billing Plans, Subscriptions), Notifications / Webhooks API (signature verification, event routing), sandbox environment
 - Muse Spark Open (Baseten meta-models/muse-spark-open-1026, fallback Fireworks accounts/fireworks/models/muse-spark-open) — LLM with tool calling for the shopping agent
 - AG Grid Community — merchant dashboard data grid
 - Node.js, Express, SQLite (node:sqlite)
@@ -178,7 +181,6 @@ dashboard and the SQLite persistence — was built in that window.
   README.
 
 ## What's next
-- Webhooks for asynchronous payment events (subscription billing, invoice paid) so the dashboard updates without a refresh.
 - Subscription revise: change the weekly box price when burn rate shifts, without cancelling and re-subscribing.
 - Automatic payment reminders for sent invoices.
 
@@ -211,7 +213,9 @@ dashboard and the SQLite persistence — was built in that window.
   link. Approve on PayPal sandbox → land back with the green "subscription
   active" banner; the dashboard subscriptions grid shows ACTIVE with the
   next billing date 7 days out. One line: "Approve once — the box bills
-  itself every week."
+  itself every week." Then glance at the webhook events grid: PayPal already
+  pushed `BILLING.SUBSCRIPTION.ACTIVATED` — the status updated itself, no
+  Refresh click.
 - **2:25–2:55 — Merchant dashboard + close.** Open the dashboard: inventory
   grid with the low-stock alert, supplier price grid with creep alerts and
   best-buy column, spend stats; the order in AG Grid with its expected

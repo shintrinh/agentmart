@@ -152,6 +152,14 @@ async function loadSubscriptions() {
   return list;
 }
 
+let webhookGridApi;
+async function loadWebhookEvents() {
+  const { data } = await api('/api/webhook-events');
+  const list = Array.isArray(data) ? data : [];
+  if (webhookGridApi) webhookGridApi.setGridOption('rowData', list.map((e) => ({ ...e, receivedAt: e.receivedAt.slice(0, 19).replace('T', ' '), handled: e.handled ? 'handled' : 'logged' })));
+  return list;
+}
+
 async function loadAll() {
   const { data: orders } = await api('/api/orders');
   const list = Array.isArray(orders) ? orders : [];
@@ -179,6 +187,7 @@ async function loadAll() {
   await loadPlans();
   await loadWaste();
   await loadSubscriptions();
+  await loadWebhookEvents();
 }
 
 document.getElementById('adjustForm').addEventListener('submit', async (e) => {
@@ -413,6 +422,19 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     rowData: [],
   };
   subsGridApi = agGrid.createGrid(document.getElementById('subsGrid'), subsOptions);
+
+  const webhookOptions = {
+    columnDefs: [
+      { field: 'eventType', headerName: 'Event', filter: true, flex: 2 },
+      { field: 'resourceId', headerName: 'Resource id', filter: true, flex: 2 },
+      { field: 'receivedAt', headerName: 'Received', filter: true, flex: 1 },
+      { field: 'handled', filter: true, flex: 1 },
+      { field: 'summary', filter: true, flex: 3 },
+    ],
+    defaultColDef: { sortable: true, resizable: true },
+    rowData: [],
+  };
+  webhookGridApi = agGrid.createGrid(document.getElementById('webhookGrid'), webhookOptions);
 
   document.getElementById('subsGrid').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-sub-action]');

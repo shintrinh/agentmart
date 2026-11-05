@@ -120,6 +120,12 @@
   </section>
 
   <section>
+    <h2>Webhook events — what PayPal pushed</h2>
+    <p class="muted">PayPal sends async events here (subscription activated/cancelled, invoice paid, order approved, sale completed). Each event is signature-verified before it is trusted; handled events updated the dashboard on their own — no Refresh click needed.</p>
+    <div id="webhookGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+  </section>
+
+  <section>
     <h2>Orders</h2>
     <p class="muted">AG Grid — sort, filter and resize any column. Every row is a real PayPal sandbox order created by the agent or the manual checkout.</p>
     <div id="ordersGrid" class="ag-theme-quartz" style="height: 320px; width: 100%;"></div>

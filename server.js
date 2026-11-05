@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS restock_plans (id TEXT PRIMARY KEY, name TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS waste (id INTEGER PRIMARY KEY AUTOINCREMENT, productId TEXT NOT NULL, qty REAL NOT NULL, cost REAL NOT NULL, wastedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscription_plans (amount REAL PRIMARY KEY, planId TEXT NOT NULL, productId TEXT NOT NULL, createdAt TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, planId TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, boxItems TEXT NOT NULL, createdAt TEXT NOT NULL, lastFulfilledAt TEXT, nextBillingDate TEXT);`);
+CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, planId TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, boxItems TEXT NOT NULL, createdAt TEXT NOT NULL, lastFulfilledAt TEXT, nextBillingDate TEXT);
+CREATE TABLE IF NOT EXISTS webhook_events (id TEXT PRIMARY KEY, eventType TEXT NOT NULL, resourceId TEXT, receivedAt TEXT NOT NULL, handled INTEGER NOT NULL, summary TEXT);`);
 // Orders gained columns in v3/v4; add them to older databases.
 for (const col of ['expectedDelivery TEXT', 'saved REAL', 'preventedStockouts INTEGER']) {
   try { db.exec(`ALTER TABLE orders ADD COLUMN ${col}`); } catch { /* already there */ }
@@ -578,18 +579,22 @@ async function capturePayPalOrder(orderId) {
     deleteCartRow(rec.sessionId);
     // A captured restock order means the delivery arrived: add the
     // delivered quantities to stock (once per order).
-    if (wasCaptured && rec.status === 'COMPLETED') {
-      for (const item of rec.items || []) {
-        const p = productById(item.id) || PRODUCTS.find((x) => x.name === item.name);
-        if (!p) continue;
-        inventory.set(p.id, (inventory.get(p.id) ?? p.stock) + item.qty);
-        saveStock(p.id);
-      }
-      // A captured order is money owed: create the payables per supplier.
-      createPayablesForOrder(orderId);
-    }
+    if (wasCaptured && rec.status === 'COMPLETED') applyOrderDelivery(orderId, rec);
   }
   return data;
+}
+
+// Shared by capture and by the webhook auto-capture: a completed order
+// means the delivery arrived (add stock) and money is owed (payables).
+function applyOrderDelivery(orderId, rec) {
+  for (const item of rec.items || []) {
+    const p = productById(item.id) || PRODUCTS.find((x) => x.name === item.name);
+    if (!p) continue;
+    inventory.set(p.id, (inventory.get(p.id) ?? p.stock) + item.qty);
+    saveStock(p.id);
+  }
+  // A captured order is money owed: create the payables per supplier.
+  createPayablesForOrder(orderId);
 }
 
 /* ---------------------------------------------------------- PayPal invoicing */
@@ -759,6 +764,203 @@ async function fulfillSubscription(id, session) {
   return { subscriptionId: id, plan, total, saved, expectedDelivery: order?.expectedDelivery, orderId: r.orderId, checkoutUrl: r.checkoutUrl, reply: r.reply };
 }
 
+/* ---------------------------------------------- PayPal webhooks (v8) */
+// PayPal pushes async events here (subscription approved/cancelled, invoice
+// paid, order approved). Every event is verified against PayPal before it
+// is trusted, then routed: subscriptions sync their status, invoices flip
+// to PAID, and an approved order is captured even if the buyer closed the
+// tab instead of returning to the store.
+function saveWebhookEvent(event, handled, summary) {
+  db.prepare('INSERT OR IGNORE INTO webhook_events (id, eventType, resourceId, receivedAt, handled, summary) VALUES (?, ?, ?, ?, ?, ?)').run(
+    event.id, event.event_type, event.resource?.id || null, new Date().toISOString(), handled ? 1 : 0, summary || '');
+}
+function recentWebhookEvents(limit = 50) {
+  return db.prepare('SELECT * FROM webhook_events ORDER BY receivedAt DESC LIMIT ?').all(limit);
+}
+
+// Pure router: event -> action descriptors. No I/O, unit-tested.
+function routeWebhookEvent(event) {
+  const type = event.event_type || '';
+  const res = event.resource || {};
+  if (type.startsWith('BILLING.SUBSCRIPTION.')) {
+    const byType = { 'BILLING.SUBSCRIPTION.CREATED': 'APPROVAL_PENDING', 'BILLING.SUBSCRIPTION.ACTIVATED': 'ACTIVE', 'BILLING.SUBSCRIPTION.SUSPENDED': 'SUSPENDED', 'BILLING.SUBSCRIPTION.RE-ACTIVATED': 'ACTIVE', 'BILLING.SUBSCRIPTION.CANCELLED': 'CANCELLED', 'BILLING.SUBSCRIPTION.EXPIRED': 'EXPIRED' };
+    if (type === 'BILLING.SUBSCRIPTION.PAYMENT.FAILED') {
+      return { kind: 'subscription-payment-failed', id: res.id, summary: `Subscription ${res.id} payment failed` };
+    }
+    return { kind: 'subscription', id: res.id, status: res.status || byType[type] || null, nextBillingDate: res.billing_info?.next_billing_time || null, summary: `Subscription ${res.id} → ${res.status || byType[type] || type}` };
+  }
+  if (type === 'INVOICING.INVOICE.PAID') {
+    return { kind: 'invoice-paid', invoiceId: res.id, summary: `Invoice ${res.id} paid` };
+  }
+  if (type === 'CHECKOUT.ORDER.APPROVED') {
+    return { kind: 'order-approved', orderId: res.id, summary: `Order ${res.id} approved — auto-capture` };
+  }
+  if (type === 'CHECKOUT.ORDER.COMPLETED') {
+    return { kind: 'order-completed', orderId: res.id, summary: `Order ${res.id} completed` };
+  }
+  if (type === 'PAYMENT.SALE.COMPLETED') {
+    return { kind: 'sale', saleId: res.id, subscriptionId: res.billing_agreement_id || null, summary: `Sale ${res.id} completed${res.billing_agreement_id ? ` (subscription ${res.billing_agreement_id})` : ''}` };
+  }
+  return { kind: 'unknown', summary: `Unhandled event ${type}` };
+}
+
+async function rehydrateSubscription(id) {
+  // A webhook for a subscription we lost (e.g. Render redeploy wiped the
+  // DB) re-creates the record from PayPal: status + plan amount.
+  const token = await paypalAccessToken();
+  const subRes = await fetch(`${PAYPAL_BASE}/v1/billing/subscriptions/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!subRes.ok) return null;
+  const sub = await subRes.json();
+  let amount = 0;
+  if (sub.plan_id) {
+    const planRes = await fetch(`${PAYPAL_BASE}/v1/billing/plans/${sub.plan_id}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (planRes.ok) {
+      const plan = await planRes.json();
+      amount = Number(plan.billing_cycles?.[0]?.pricing_scheme?.fixed_price?.value || 0);
+    }
+  }
+  const rec = { planId: sub.plan_id || '', amount, status: sub.status || 'APPROVAL_PENDING', boxItems: [], createdAt: new Date().toISOString(), lastFulfilledAt: null, nextBillingDate: sub.billing_info?.next_billing_time || null };
+  subscriptions.set(id, rec);
+  saveSubscription(id, rec);
+  return rec;
+}
+
+async function handleWebhookEvent(event) {
+  const action = routeWebhookEvent(event);
+  let handled = false;
+  try {
+    if (action.kind === 'subscription') {
+      let rec = subscriptions.get(action.id);
+      if (!rec && action.id) rec = await rehydrateSubscription(action.id);
+      if (rec) {
+        if (action.status) rec.status = action.status;
+        if (action.nextBillingDate) rec.nextBillingDate = action.nextBillingDate;
+        saveSubscription(action.id, rec);
+        handled = true;
+      }
+    } else if (action.kind === 'subscription-payment-failed') {
+      handled = Boolean(subscriptions.get(action.id));
+    } else if (action.kind === 'invoice-paid') {
+      for (const [localId, rec] of invoices) {
+        if (rec.invoiceId === action.invoiceId) {
+          rec.status = 'PAID';
+          saveInvoice(localId, rec);
+          handled = true;
+        }
+      }
+    } else if (action.kind === 'order-approved') {
+      const rec = orders.get(action.orderId);
+      if (rec && rec.status === 'CREATED') {
+        try {
+          await capturePayPalOrder(action.orderId);
+          handled = true;
+        } catch (e) {
+          // The buyer may have completed the order through the return URL
+          // first; sync the status from PayPal instead of failing.
+          try {
+            const token = await paypalAccessToken();
+            const res = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${action.orderId}`, { headers: { Authorization: `Bearer ${token}` } });
+            if (res.ok) {
+              const live = await res.json();
+              if (live.status === 'COMPLETED') {
+                rec.status = 'COMPLETED';
+                saveOrder(action.orderId, rec);
+                applyOrderDelivery(action.orderId, rec);
+                handled = true;
+              }
+            }
+          } catch { /* leave for the return-URL flow */ }
+        }
+      }
+    } else if (action.kind === 'order-completed') {
+      const rec = orders.get(action.orderId);
+      if (rec && rec.status !== 'COMPLETED') {
+        rec.status = 'COMPLETED';
+        saveOrder(action.orderId, rec);
+        applyOrderDelivery(action.orderId, rec);
+        handled = true;
+      }
+    } else if (action.kind === 'sale') {
+      handled = true; // logged; the subscription/order handlers own the state
+    }
+  } catch (e) {
+    console.error('webhook handler failed:', e.message);
+  }
+  saveWebhookEvent(event, handled, action.summary);
+  return { handled, summary: action.summary };
+}
+
+async function verifyPayPalWebhook(req, event) {
+  const webhookIdRow = db.prepare('SELECT value FROM meta WHERE key=?').get('paypal_webhook_id');
+  let webhookId = webhookIdRow?.value;
+  if (!webhookId) {
+    // Fall back to listing webhooks and matching our URL (e.g. the webhook
+    // was created in the developer dashboard by hand).
+    const token = await paypalAccessToken();
+    const list = await fetch(`${PAYPAL_BASE}/v1/notifications/webhooks`, { headers: { Authorization: `Bearer ${token}` } });
+    if (list.ok) {
+      const data = await list.json();
+      const mine = (data.webhooks || []).find((w) => w.url === `${BASE_URL}/api/webhooks/paypal`);
+      if (mine) {
+        webhookId = mine.id;
+        db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('paypal_webhook_id', webhookId);
+      }
+    }
+  }
+  if (!webhookId) return false;
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v1/notifications/verify-webhook-signature`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      auth_algo: req.headers['paypal-auth-algo'],
+      cert_url: req.headers['paypal-cert-url'],
+      transmission_id: req.headers['paypal-transmission-id'],
+      transmission_sig: req.headers['paypal-transmission-sig'],
+      transmission_time: req.headers['paypal-transmission-time'],
+      webhook_id: webhookId,
+      webhook_event: event,
+    }),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return data.verification_status === 'SUCCESS';
+}
+
+async function registerPayPalWebhook() {
+  // Self-register on boot so the hosted demo receives events without a
+  // manual dashboard step. Never crashes the server: failures only log.
+  if (!paypalConfigured) return;
+  const url = `${BASE_URL}/api/webhooks/paypal`;
+  if (url.startsWith('http://localhost')) {
+    console.log('webhook: skipping registration on localhost (PayPal needs a public HTTPS URL)');
+    return;
+  }
+  try {
+    const token = await paypalAccessToken();
+    const list = await fetch(`${PAYPAL_BASE}/v1/notifications/webhooks`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!list.ok) throw new Error(`list webhooks failed (${list.status})`);
+    const data = await list.json();
+    const existing = (data.webhooks || []).find((w) => w.url === url);
+    if (existing) {
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('paypal_webhook_id', existing.id);
+      console.log(`webhook: already registered (${existing.id})`);
+      return;
+    }
+    const res = await fetch(`${PAYPAL_BASE}/v1/notifications/webhooks`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, event_types: [{ name: '*' }] }),
+    });
+    if (!res.ok) throw new Error(`create webhook failed (${res.status}): ${await res.text()}`);
+    const created = await res.json();
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('paypal_webhook_id', created.id);
+    console.log(`webhook: registered ${created.id} for ${url}`);
+  } catch (e) {
+    console.error('webhook: registration failed (events will not arrive):', e.message);
+  }
+}
+
 /* -------------------------------------------------------------- agent tools */
 function searchProducts(query, maxPrice) {
   const q = (query || '').toLowerCase();
@@ -816,8 +1018,9 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'check_subscriptions', description: 'List the café\'s weekly restock subscriptions with their PayPal status, amount, box contents and next billing date. Use when the user asks what subscriptions they have.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'cancel_subscription', description: 'Cancel a weekly restock subscription on PayPal (by subscription id, or the latest one if omitted). Use when the user asks to cancel their subscription.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'fulfill_subscription', description: 'Fulfill this week\'s box for an ACTIVE weekly restock subscription: smart restock within the subscription amount and create the PayPal checkout. Use when the user asks to fulfill this week\'s subscription box.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'check_recent_events', description: 'List recent PayPal webhook events received by the server (subscription activated/cancelled, invoice paid, order approved, sale completed) with their time and whether they were handled. Use when the user asks about recent payments or webhook events.', parameters: { type: 'object', properties: {} } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -902,6 +1105,9 @@ async function executeLlmTool(session, name, args) {
     const id = args.subscriptionId || [...subscriptions.entries()].find(([, r]) => r.status === 'ACTIVE')?.[0];
     if (!id) return { message: 'No ACTIVE subscription to fulfill — set one up and approve it on PayPal first.' };
     return fulfillSubscription(id, session);
+  }
+  if (name === 'check_recent_events') {
+    return { events: recentWebhookEvents(10) };
   }
   return { error: 'UNKNOWN_TOOL' };
 }
@@ -1041,6 +1247,15 @@ async function runAgent(session, rawMessage) {
       if (e.message === 'NOTHING_TO_RESTOCK') return { reply: 'Nothing needs restocking right now — all stock is above its reorder point, so there is no box to subscribe to yet.' };
       throw e;
     }
+  }
+
+  // Webhook events (v8): "any new payments?" / "did my subscription payment
+  // go through?" — answered from the PayPal webhook event log.
+  if (/(webhook|new payments|payment go through|payments? (came|arrived)|any (new )?payments)/.test(msg)) {
+    const events = recentWebhookEvents(5);
+    if (!events.length) return { reply: 'No PayPal webhook events have arrived yet. Approve an order or a subscription and PayPal will push the event here — the dashboard shows the event log live.' };
+    const lines = events.map((e) => `${e.receivedAt.slice(0, 19).replace('T', ' ')} — ${e.eventType}${e.resourceId ? ` (${e.resourceId})` : ''} — ${e.handled ? 'handled' : 'logged'}`).join('\n');
+    return { reply: `Recent PayPal events:\n${lines}` };
   }
 
   // Waste / overstock: "how much am I wasting?" / "am I overstocked?"
@@ -1209,7 +1424,7 @@ async function runAgent(session, rawMessage) {
 
   // Greeting / help
   if (/(hello|hi|hey|help|xin chào|chao)/.test(msg)) {
-    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Checkout"' };
+    return { reply: 'Hi! I am the AgentMart shopping agent. I can search the catalog, build your cart and check out with PayPal — all from chat. Try:\n• "Show me coffee under $20"\n• "Add 2 arabica beans"\n• "Build me a coffee starter kit under $60"\n• "What am I running out of?"\n• "Smart restock under $60"\n• "Did any prices go up?"\n• "What do I owe suppliers?"\n• "How much have you saved me?"\n• "When will I run out of everything?"\n• "Am I overstocked?"\n• "Set up a weekly restock subscription under $60"\n• "Any new payments?"\n• "Checkout"' };
   }
 
   // Default: treat as a search
@@ -1334,6 +1549,25 @@ app.post('/api/subscriptions/:id/fulfill', async (req, res) => {
     res.status(502).json({ error: 'FULFILL_FAILED', message: e.message });
   }
 });
+
+// Webhooks (v8): PayPal pushes async events here. Every event is verified
+// against PayPal before it is trusted; unverified requests get 401.
+app.post('/api/webhooks/paypal', async (req, res) => {
+  const event = req.body || {};
+  if (!event.id || !event.event_type) return res.status(400).json({ error: 'INVALID_EVENT' });
+  const sigHeaders = ['paypal-auth-algo', 'paypal-cert-url', 'paypal-transmission-id', 'paypal-transmission-sig', 'paypal-transmission-time'];
+  if (sigHeaders.some((h) => !req.headers[h])) return res.status(401).json({ error: 'MISSING_SIGNATURE' });
+  try {
+    const ok = await verifyPayPalWebhook(req, event);
+    if (!ok) return res.status(401).json({ error: 'INVALID_SIGNATURE' });
+    const out = await handleWebhookEvent(event);
+    res.json({ received: true, ...out });
+  } catch (e) {
+    console.error(e);
+    res.status(502).json({ error: 'WEBHOOK_FAILED', message: e.message });
+  }
+});
+app.get('/api/webhook-events', (req, res) => res.json(recentWebhookEvents(50)));
 app.get('/api/payables', (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const list = [...payables.entries()].map(([id, r]) => ({ id, ...r, overdue: r.status === 'UNPAID' && r.dueDate < today })).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
@@ -1543,6 +1777,8 @@ for (const [orderId, rec] of orders) {
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`AgentMart running at ${BASE_URL} (PayPal env: ${PAYPAL_ENV}, configured: ${paypalConfigured}, LLM: ${llmConfigured ? LLM_MODEL : 'deterministic fallback'})`);
+    // v8: self-register the PayPal webhook so async events arrive.
+    registerPayPalWebhook().catch((e) => console.error('webhook: registration failed:', e.message));
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents };
