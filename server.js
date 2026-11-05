@@ -334,6 +334,14 @@ function createPlan({ name, dayOfWeek, budget }) {
 for (const row of db.prepare('SELECT * FROM restock_plans').all()) {
   plans.set(row.id, { id: row.id, name: row.name, dayOfWeek: row.dayOfWeek, budget: row.budget, active: !!row.active, lastRunAt: row.lastRunAt, createdAt: row.createdAt });
 }
+// Savings ledger: totals over captured orders. Shared by the deterministic
+// intent and the LLM check_savings tool, so both answer from the same data.
+function savingsSummary() {
+  const done = [...orders.values()].filter((o) => o.status === 'COMPLETED');
+  const totalSaved = Math.round(done.reduce((s, o) => s + (o.saved || 0), 0) * 100) / 100;
+  const preventedStockouts = done.reduce((s, o) => s + (o.preventedStockouts || 0), 0);
+  return { capturedOrders: done.length, totalSaved, preventedStockouts };
+}
 // Waste: perishables stocked above maxStock spoil a little every simulated
 // day (10% of the excess, at least 1 unit). Demo simulation, labeled so in
 // the UI — it models the carrying cost of overbuying, not a sensor.
@@ -672,9 +680,10 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'smart_restock', description: 'Build a restock cart from the items that will run out soon, sized by burn rate, and create the PayPal checkout in one step. Use when the user asks to restock before running out.', parameters: { type: 'object', properties: { budget: { type: 'number' } } } } },
   { type: 'function', function: { name: 'check_prices', description: 'Check supplier price history: current price, change over 3 months and 1 month, and which prices crept up more than 5%. Use when the user asks about prices going up.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'check_payables', description: 'Check what the café owes suppliers: unpaid payables per supplier, amounts, due dates and overdue flags. Use when the user asks what they owe.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'check_savings', description: 'Check how much the agent has saved the café: total dollars saved by buying from cheaper alternate suppliers, stock-outs prevented, and number of captured orders. Use when the user asks how much you have saved them.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_restock_plan', description: 'Run the active weekly restock plan (or the named plan): smart restock within the plan budget and create the PayPal checkout. Use when the user asks to run their weekly restock.', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -712,6 +721,9 @@ async function executeLlmTool(session, name, args) {
   }
   if (name === 'check_stock') {
     return { inventory: inventoryView(), forecast: forecastView(), waste: wasteSummary() };
+  }
+  if (name === 'check_savings') {
+    return savingsSummary();
   }
   if (name === 'run_restock_plan') {
     const all = [...plans.values()].filter((p) => p.active);
@@ -841,11 +853,9 @@ async function runAgent(session, rawMessage) {
 
   // Savings ledger: "how much have you saved me?"
   if (/(how much.*(sav|save)|what.*(sav|save)|savings|tiết kiệm|tiet kiem)/.test(msg)) {
-    const done = [...orders.values()].filter((o) => o.status === 'COMPLETED');
-    const saved = done.reduce((s, o) => s + (o.saved || 0), 0);
-    const prevented = done.reduce((s, o) => s + (o.preventedStockouts || 0), 0);
-    if (!done.length) return { reply: 'No captured orders yet, so no savings recorded. Run a smart restock and approve it — I will track every dollar the cheaper suppliers save you.' };
-    return { reply: `Across ${done.length} captured order(s), I have saved you ${money(saved)} by buying from cheaper alternate suppliers, and prevented ${prevented} stock-out(s) by restocking before items ran out.` };
+    const s = savingsSummary();
+    if (!s.capturedOrders) return { reply: 'No captured orders yet, so no savings recorded. Run a smart restock and approve it — I will track every dollar the cheaper suppliers save you.' };
+    return { reply: `Across ${s.capturedOrders} captured order(s), I have saved you ${money(s.totalSaved)} by buying from cheaper alternate suppliers, and prevented ${s.preventedStockouts} stock-out(s) by restocking before items ran out.` };
   }
 
   // Waste / overstock: "how much am I wasting?" / "am I overstocked?"
@@ -1275,4 +1285,4 @@ if (require.main === module) {
     console.log(`AgentMart running at ${BASE_URL} (PayPal env: ${PAYPAL_ENV}, configured: ${paypalConfigured}, LLM: ${llmConfigured ? LLM_MODEL : 'deterministic fallback'})`);
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS };

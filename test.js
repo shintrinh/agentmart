@@ -433,6 +433,18 @@ test('smart restock never buys above max stock', async () => {
   assert.ok(!plan2.some((i) => i.id === 'oat-milk'));
 });
 
+test('savingsSummary reports zero with no captured orders', () => {
+  const { savingsSummary } = require('./server');
+  assert.deepEqual(savingsSummary(), { capturedOrders: 0, totalSaved: 0, preventedStockouts: 0 });
+});
+
+test('check_savings tool is registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  const tool = llmTools.find((t) => t.function.name === 'check_savings');
+  assert.ok(tool);
+  assert.match(tool.function.description, /saved/);
+});
+
 test('demo reset restores seed stock and clears waste', async () => {
   const { status, data } = await api('/api/demo/reset', { method: 'POST', body: JSON.stringify({}) });
   assert.equal(status, 200);
