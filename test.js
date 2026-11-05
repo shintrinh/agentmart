@@ -267,7 +267,7 @@ test('agent answers the price drop question (v10)', async () => {
 test('expectedDeliveryDate uses the longest lead time', () => {
   const { expectedDeliveryDate } = require('./server');
   const d = new Date();
-  d.setDate(d.getDate() + 4);
+  d.setUTCDate(d.getUTCDate() + 4);
   assert.equal(expectedDeliveryDate([{ leadTimeDays: 3 }, { leadTimeDays: 4 }]), d.toISOString().slice(0, 10));
 });
 
@@ -331,6 +331,11 @@ test('nextRunDate finds the coming weekday', () => {
   assert.equal(nextRunDate(1, new Date('2026-11-05T00:00:00Z')), '2026-11-09');
   assert.equal(nextRunDate(4, new Date('2026-11-05T00:00:00Z')), '2026-11-05');
   assert.equal(nextRunDate(5, new Date('2026-11-05T00:00:00Z')), '2026-11-06');
+  // Late in the UTC day the local date is already the next day: the old
+  // local-getDay()/UTC-slice mix put a Monday plan's next run on Sunday
+  // 2026-11-08. UTC arithmetic keeps it on Monday 2026-11-09.
+  assert.equal(nextRunDate(1, new Date('2026-11-05T22:49:00Z')), '2026-11-09');
+  assert.equal(nextRunDate(4, new Date('2026-11-05T22:49:00Z')), '2026-11-05');
 });
 
 test('forecastView projects stock-out and order-by dates', () => {
@@ -342,8 +347,8 @@ test('forecastView projects stock-out and order-by dates', () => {
   const inv = inventoryView().find((r) => r.id === 'matcha');
   const matcha = rows.find((r) => r.id === 'matcha');
   const today = new Date();
-  const stockout = new Date(today); stockout.setDate(stockout.getDate() + Math.floor(inv.daysLeft));
-  const orderBy = new Date(stockout); orderBy.setDate(orderBy.getDate() - inv.leadTimeDays);
+  const stockout = new Date(today); stockout.setUTCDate(stockout.getUTCDate() + Math.floor(inv.daysLeft));
+  const orderBy = new Date(stockout); orderBy.setUTCDate(orderBy.getUTCDate() - inv.leadTimeDays);
   assert.equal(matcha.stockoutDate, stockout.toISOString().slice(0, 10));
   assert.equal(matcha.orderByDate, orderBy.toISOString().slice(0, 10));
   assert.equal(matcha.orderNow, orderBy.toISOString().slice(0, 10) <= today.toISOString().slice(0, 10));
@@ -753,4 +758,27 @@ test('v11 demo reset restores the seed group intents', async () => {
   const matcha = data.find((d) => d.itemId === 'matcha' && d.groupId === 'grp-bay-area');
   assert.equal(matcha.pooledQty, 25);
   assert.equal(matcha.tier, 2);
+});
+
+test("agent routes 'Restock before I run out' to smart restock, not the kit builder", async () => {
+  // The phrase used to fall through to the kit builder (its pattern also
+  // matches "restock"). Fill every shelf so the smart-restock plan is
+  // empty: the branch then answers without creating a PayPal order, so
+  // this test still makes no PayPal network calls.
+  const { data: products } = await api('/api/products');
+  for (const p of products) {
+    const r = await api(`/api/inventory/${p.id}/adjust`, { method: 'POST', body: JSON.stringify({ stock: 100 }) });
+    assert.equal(r.status, 200);
+  }
+  const { status, data } = await api('/api/agent', {
+    method: 'POST',
+    body: JSON.stringify({ session: 'test-restock-phrase', message: 'Restock before I run out' }),
+  });
+  assert.equal(status, 200);
+  assert.match(data.reply, /Nothing needs restocking/);
+  assert.doesNotMatch(data.reply, /starter kit/);
+  // Restore the seed stock for the demo and for any later run.
+  const reset = await api('/api/demo/reset', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(reset.status, 200);
+  assert.equal(reset.data.inventory.find((r) => r.id === 'matcha').stock, 1);
 });

@@ -356,7 +356,9 @@ function bestSupplier(p) {
 function expectedDeliveryDate(items) {
   const maxLead = Math.max(0, ...items.map((i) => i.leadTimeDays ?? productById(i.id)?.leadTimeDays ?? 0));
   const d = new Date();
-  d.setDate(d.getDate() + maxLead);
+  // UTC throughout: getDate()/toISOString() mix local and UTC days, so a
+  // late-UTC evening shows yesterday's date (and the wrong weekday).
+  d.setUTCDate(d.getUTCDate() + maxLead);
   return d.toISOString().slice(0, 10);
 }
 // Forecast: projected stock-out date and the date to order by, per item.
@@ -364,7 +366,9 @@ function expectedDeliveryDate(items) {
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 function nextRunDate(dayOfWeek, from = new Date()) {
   const d = new Date(from);
-  d.setDate(d.getDate() + ((dayOfWeek - d.getDay() + 7) % 7));
+  // UTC throughout (see expectedDeliveryDate): local getDay() with a UTC
+  // slice put a Monday plan's next run on a Sunday late in the UTC day.
+  d.setUTCDate(d.getUTCDate() + ((dayOfWeek - d.getUTCDay() + 7) % 7));
   return d.toISOString().slice(0, 10);
 }
 function forecastView() {
@@ -373,9 +377,9 @@ function forecastView() {
   return inventoryView().map((r) => {
     if (!isFinite(r.daysLeft)) return { ...r, stockoutDate: null, orderByDate: null, orderNow: false };
     const stockout = new Date(today);
-    stockout.setDate(stockout.getDate() + Math.floor(r.daysLeft));
+    stockout.setUTCDate(stockout.getUTCDate() + Math.floor(r.daysLeft));
     const orderBy = new Date(stockout);
-    orderBy.setDate(orderBy.getDate() - r.leadTimeDays);
+    orderBy.setUTCDate(orderBy.getUTCDate() - r.leadTimeDays);
     return { ...r, stockoutDate: iso(stockout), orderByDate: iso(orderBy), orderNow: iso(orderBy) <= iso(today) };
   });
 }
@@ -1893,7 +1897,9 @@ async function runAgent(session, rawMessage) {
   }
 
   // Smart restock: "restock me before Friday" / "smart restock under $60"
-  if (/(smart restock|restock me|reorder what.*(low|need)|don.*run out)/.test(msg)) {
+  // / "restock before I run out" — the last phrase used to fall through to
+  // the kit builder below (its pattern also matches "restock").
+  if (/(smart restock|restock me|restock before|reorder what.*(low|need)|don.*run out)/.test(msg)) {
     const budgetMatch = msg.match(/(?:under|below|\$)\s*\$?(\d+)/);
     const budget = budgetMatch ? Number(budgetMatch[1]) : 60;
     const { plan, total, saved } = smartRestockPlan(budget);

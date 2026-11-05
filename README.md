@@ -187,25 +187,25 @@ Weekly subscription v7 (live sandbox 2026-11-05): product
 (GET 200). Local server: subscription `I-UH1CS723HVM9` ($56 box, same
 sizing) created via `POST /api/subscriptions`, listed by the agent and
 refreshed live from PayPal; fulfill correctly blocked while pending
-(400 SUBSCRIPTION_NOT_ACTIVE). Approve → ACTIVE → fulfill still to be
-verified on the hosted demo after deploy (needs a buyer-sandbox approval
-click in the browser).
+(400 SUBSCRIPTION_NOT_ACTIVE). Hosted verification 2026-11-05: subscription `I-HCVETPS5LALK` ($60 box) approved → ACTIVE, next billing 2026-11-12; fulfill → PayPal order `8HK23012N21482508` $60 CREATED; webhook `BILLING.SUBSCRIPTION.ACTIVATED` arrived ~1 minute after approval. The hosted database resets on every Render redeploy, so the flow is re-run after the final deploy before filming.
 Webhooks v8 (live local 2026-11-05): `POST /api/webhooks/paypal` with a
 fake signature → PayPal's verify API rejects it → 401 INVALID_SIGNATURE,
 and the fake event is not logged. Missing signature headers → 401
 MISSING_SIGNATURE. Boot on localhost correctly skips webhook registration
-(PayPal needs a public HTTPS URL). Real signed events still to be verified
-on the hosted demo after deploy (approve a subscription → PayPal pushes
-`BILLING.SUBSCRIPTION.ACTIVATED`).
+(PayPal needs a public HTTPS URL). Real signed events verified on the
+hosted demo 2026-11-05: `BILLING.SUBSCRIPTION.ACTIVATED` arrived 17:07:57
+(~1 minute after approval) and `PAYMENT.SALE.COMPLETED` 17:08:19; auto-capture
+proven — order `5C01963551372040L` $56 COMPLETED after `CHECKOUT.ORDER.APPROVED`.
 Revise v9 (live local 2026-11-05): PayPal probe — plan $64 created (201),
 revise on an APPROVAL_PENDING subscription → 404 RESOURCE_NOT_FOUND (PayPal
 only revises ACTIVE subscriptions), so the server validates ACTIVE first and
 returns a clear 400 SUBSCRIPTION_NOT_ACTIVE. Agent "Revise my subscription"
 with no ACTIVE subscription answers correctly (intent runs before the v7
 subscription block, which also matches the word "subscription"). Full revise
-on an ACTIVE subscription still to be verified on the hosted demo after
-deploy + buyer approval (a price rise needs the buyer to approve the change
-link; a price drop applies at once).
+on an ACTIVE subscription verified on the hosted demo 2026-11-05: revise
+`I-HCVETPS5LALK` to $64 → needsApproval true + PayPal approve link, the
+subscription stays $60 ACTIVE until the buyer approves the rise (a price
+drop applies at once).
 Remind + real data v10 (live local + sandbox probes 2026-11-05): PayPal
 probe — invoice with `payment_term: NET_30` created 201 (DRAFT); remind on
 a DRAFT invoice → 422 CANNOT_REMIND_INVOICE (PayPal only reminds SENT, so
@@ -220,7 +220,9 @@ live: invoice `INV2-5Q5W-NM59-9KNH-C3S8` created from completed order
 `lastRemindedAt` stored) → refresh (SENT). Agent live: "Did any prices go
 down?" lists Cold Brew −10.8% and Instant Coffee −11.4%; "Smart restock
 under $60" → PayPal order `8XF34796RJ656345U` $58.47 (Craft Matcha ×1 +
-Oat Milk ×3 from Green Valley Farms, saved $1.20). Tests 61/61 PASS.
+Oat Milk ×3 from Green Valley Farms, saved $1.20). Tests 71/71 PASS.
+Group buying v11 (live local + sandbox probes 2026-11-05): agent "What are the group deals?" lists matcha pooled 25 → Tier 2 $36.45 (saves $101.25) and oat milk pooled 20 → Tier 1 $5.69 (saves $6.00); place group order for oat milk → PayPal orders `51J43083WW264715X` and `0CY62866RX1252355` $113.80 CREATED (20× @ $5.69, not approved, no money moved).
+Deep-analysis fixes 2026-11-06 (v11.1): date helpers now use UTC throughout — the old local-getDay()/UTC-slice mix put a Monday plan's next run on Sunday 2026-11-08 late in the UTC day; the deterministic intent engine now routes "Restock before I run out" to smart restock instead of the kit builder (verified live: PayPal order `0W67216178839982L` $58.47). The server loads `.env` via dotenv, so `npm start` works from the setup instructions alone.
 
 ## Architecture
 
@@ -290,14 +292,8 @@ same.
 ## Roadmap ideas
 
 - Plug a second LLM provider into the same tool layer for comparison.
-- Group buying (v11): several cafés pool one order for a wholesale tier
-  price — 5% off at 10+ pooled units, 10% off at 25+, on the
-  best-supplier price. One PayPal checkout for the pooled quantity; after
-  capture, each café owes only its own share (payables per café) and only
-  our share goes onto our shelf. Demo group "Bay Area Specialty Cafés"
-  (Philz Coffee and Sightglass Coffee are demo members, not real
-  participants): matcha 25 units → Tier 2, $36.45 vs $40.50, saves
-  $101.25; oat milk 20 units → Tier 1, $5.69 vs $5.99, saves $6.00.
-- Merchant-side agent: automatic payment reminders for sent invoices (v10
-  does on-demand reminders; the auto-reminder schedule is still manual);
-  webhooks for asynchronous payment events.
+- Scheduled auto-reminders: v10 reminds on demand from chat and the
+  dashboard; the next step is a schedule that reminds automatically when
+  an invoice goes overdue (webhooks already deliver the payment events).
+- Multi-location cafés in group buying: one owner, several locations
+  pooling into the same wholesale tier.

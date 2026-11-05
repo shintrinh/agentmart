@@ -165,8 +165,9 @@ so the second charge lands 7 days out rather than inside the demo.
 ## "Significant update" note (existing-project rule)
 AgentMart is a new project built for this hackathon during the submission
 period (Oct 22 – Nov 12, 2026). Everything in it — the storefront, the LLM
-agent, the PayPal Orders + Invoicing integrations, the AG Grid merchant
-dashboard and the SQLite persistence — was built in that window.
+agent, the PayPal Orders + Invoicing + Subscriptions + Webhooks
+integrations, the invoice reminders, the group-buying flow, the AG Grid
+merchant dashboard and the SQLite persistence — was built in that window.
 
 ## Challenges / what we learned
 - Making the agent's actions and the manual UI share exactly one source of
@@ -182,7 +183,6 @@ dashboard and the SQLite persistence — was built in that window.
   the first smart-restock plan produced a 3.3-unit quantity that PayPal
   rejected (400). Fix: restock quantities are rounded up to whole units and
   the PayPal item quantity is rounded defensively at checkout.
-  reorders.
 - A promise the agent could not keep: the first substitution reply told the
   user to say "remove robusta", but no remove intent existed. Caught in
   live testing before it shipped — fixed with a `remove_from_cart` tool and
@@ -223,8 +223,8 @@ dashboard and the SQLite persistence — was built in that window.
   README.
 
 ## What's next
-- Group buying: several cafés pool one order to unlock a wholesale tier price.
-- Automatic payment reminders for sent invoices (v10 does on-demand reminders from chat and the dashboard; the auto-reminder schedule is still manual).
+- Scheduled auto-reminders: v10 reminds on demand from chat and the dashboard; the next step is a schedule that reminds automatically when an invoice goes overdue.
+- A second LLM provider on the same tool layer, to compare answer quality and cost on identical tools.
 
 ---
 
@@ -237,7 +237,7 @@ dashboard and the SQLite persistence — was built in that window.
 - **1:28–1:45 — Capture.** Land back on the store with the green "Payment captured" banner. Ask the agent: "What is the status of my order?" → it reports the captured order and total.
 - **1:45–2:02 — Subscribe once, bill weekly.** Ask the agent: "Set up a weekly restock subscription under $60" → it sizes this week's box ($58.47, same matcha + oat-milk), creates the PayPal subscription and shows the approve link. Approve on PayPal sandbox → land back with the green "subscription active" banner; the dashboard subscriptions grid shows ACTIVE with the next billing date 7 days out. One line: "Approve once — the box bills itself every week." Then glance at the webhook events grid: PayPal already pushed `BILLING.SUBSCRIPTION.ACTIVATED` — the status updated itself, no Refresh click.
 - **2:02–2:22 — Buy together, pay less.** Click the prompt chip "What are the group deals?" → the agent reports the Bay Area Specialty Cafés group: matcha pooled to 25 units across 3 cafés → Tier 2, $36.45 instead of $40.50, saves $101.25 vs ordering alone; oat milk pooled to 20 → Tier 1, $5.69 instead of $5.99. Say "place the group order for oat milk" → one PayPal checkout for the pooled 20 units, $113.80 — and after capture each café owes only its own share (our 8 cartons: $45.52). Show the group-buying grid with the pooled quantities, tier prices and savings.
-- **2:22–2:55 — Merchant dashboard + close.** Open the dashboard: inventory grid with the low-stock alert, supplier price grid with creep and drop alerts and best-buy column, spend stats; the order in AG Grid with its expected delivery date; the payables ledger for the suppliers in the order (amount, terms, due date) and the savings stats; the forecast grid (matcha runs out 2026-11-08, order by date already passed) and the weekly plan ("Weekly restock — Monday", next run 2026-11-09); a 10-second waste beat — set oat-milk to 16, simulate one day, $6.39 spoils into the ledger; create and send a draft invoice from the order (NET_30, due date shown), then send a payment reminder from the grid. Closing line: "One agent, one catalog, one PayPal checkout — restock at the speed of a sentence, before you run out, from the cheaper supplier, and always know what you owe — and what not to buy."
+- **2:22–2:55 — Merchant dashboard + close.** Open the dashboard: inventory grid with the low-stock alert, supplier price grid with creep and drop alerts and best-buy column, spend stats; the order in AG Grid with its expected delivery date; the payables ledger for the suppliers in the order (amount, terms, due date) and the savings stats; the forecast grid (matcha runs out in ~3 days, order-by date already passed — read the live dates off the grid when filming) and the weekly plan ("Weekly restock — Monday", next run the coming Monday); a 10-second waste beat — set oat-milk to 16, simulate one day, $6.39 spoils into the ledger; create and send a draft invoice from the order (NET_30, due date shown), then send a payment reminder from the grid. Closing line: "One agent, one catalog, one PayPal checkout — restock at the speed of a sentence, before you run out, from the cheaper supplier, and always know what you owe — and what not to buy."
 
 Recording notes: use sandbox buyer credentials (never a real account), record
 at 1080p, no third-party music/trademarks in the video (hackathon rule).
