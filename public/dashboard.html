@@ -120,6 +120,24 @@
   </section>
 
   <section>
+    <h2>Group buying — buy together, pay less</h2>
+    <p class="muted">Several cafés pool one order to unlock a wholesale tier price: 5% off when the pooled quantity reaches 10 units, 10% off at 25+. One PayPal checkout for the pooled quantity — each café owes only its own share after capture. Demo group: Bay Area Specialty Cafés — our Blue Bottle café plus Philz Coffee and Sightglass Coffee as demo members (not real participants).</p>
+    <p id="groupMsg" class="checkout-msg"></p>
+    <form id="groupForm" class="invoice-form">
+      <input id="groupName" type="text" placeholder="Group name, e.g. Bay Area Coffee Buyers" required />
+      <input id="groupCity" type="text" placeholder="City, e.g. San Francisco Bay Area" />
+      <input id="groupFocus" type="text" placeholder="Focus, e.g. coffee beans & matcha" />
+      <button type="submit">Create buying group</button>
+    </form>
+    <form id="groupJoinForm" class="invoice-form">
+      <input id="joinGroupId" type="text" placeholder="Group id, e.g. grp-bay-area" required />
+      <input id="joinCafeName" type="text" placeholder="Café name, e.g. Philz Coffee — Mission" required />
+      <button type="submit">Join group</button>
+    </form>
+    <div id="groupsGrid" class="ag-theme-quartz" style="height: 260px; width: 100%;"></div>
+  </section>
+
+  <section>
     <h2>Webhook events — what PayPal pushed</h2>
     <p class="muted">PayPal sends async events here (subscription activated/cancelled, invoice paid, order approved, sale completed). Each event is signature-verified before it is trusted; handled events updated the dashboard on their own — no Refresh click needed.</p>
     <div id="webhookGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>

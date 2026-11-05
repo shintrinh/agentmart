@@ -557,7 +557,7 @@ test('agent reports no webhook events when none arrived', async () => {
 test('v9 revise_subscription tool is registered for the LLM', () => {
   const { llmTools } = require('./server');
   assert.ok(llmTools.find((t) => t.function.name === 'revise_subscription'));
-  assert.equal(llmTools.length, 21);
+  assert.equal(llmTools.length, 25);
 });
 
 test('v10 price-drop, overdue and remind tools are registered for the LLM', () => {
@@ -635,4 +635,122 @@ test('simulate-day lowers stock', async () => {
   const after = await api('/api/inventory');
   const totalAfter = after.data.reduce((s, r) => s + r.stock, 0);
   assert.ok(totalAfter < totalBefore);
+});
+
+/* ---- v11 group buying ---- */
+test('v11 group tiers: 0/9 no discount, 10–24 → 5%, 25+ → 10%', () => {
+  const { groupTier } = require('./server');
+  assert.deepEqual(groupTier(0), { tier: 0, minQty: 0, discountPct: 0 });
+  assert.equal(groupTier(9).discountPct, 0);
+  assert.equal(groupTier(10).discountPct, 5);
+  assert.equal(groupTier(10).tier, 1);
+  assert.equal(groupTier(24).discountPct, 5);
+  assert.equal(groupTier(25).discountPct, 10);
+  assert.equal(groupTier(25).tier, 2);
+  assert.equal(groupTier(100).discountPct, 10);
+});
+
+test('v11 seed group deals: matcha pooled 25 → Tier 2, oat milk pooled 20 → Tier 1', async () => {
+  const { status, data } = await api('/api/groups');
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(data) && data.length >= 2);
+  const matcha = data.find((d) => d.itemId === 'matcha');
+  const oat = data.find((d) => d.itemId === 'oat-milk');
+  assert.equal(matcha.pooledQty, 25);
+  assert.equal(matcha.tier, 2);
+  assert.equal(matcha.unitPrice, 36.45); // 40.50 × 0.90
+  assert.equal(matcha.savings, 101.25); // (40.50 − 36.45) × 25
+  assert.equal(matcha.memberCount, 3);
+  assert.equal(oat.pooledQty, 20);
+  assert.equal(oat.tier, 1);
+  assert.equal(oat.unitPrice, 5.69); // 5.99 × 0.95
+  assert.equal(oat.savings, 6.00);
+  const ourShare = matcha.shares.find((s) => s.cafe === 'Blue Bottle Coffee — Hayes Valley');
+  assert.equal(ourShare.qty, 6);
+  assert.equal(ourShare.amount, 218.70); // 6 × 36.45
+});
+
+test('v11 create + join buying group via API', async () => {
+  const created = await api('/api/groups', { method: 'POST', body: JSON.stringify({ name: 'East Bay Roasters', city: 'Oakland', focus: 'beans' }) });
+  assert.equal(created.status, 201);
+  assert.ok(created.data.id.startsWith('grp-'));
+  assert.deepEqual(created.data.members, ['Blue Bottle Coffee — Hayes Valley']);
+  const joined = await api(`/api/groups/${encodeURIComponent(created.data.id)}/join`, { method: 'POST', body: JSON.stringify({ cafeName: 'Timeless Coffee', items: [{ itemId: 'matcha', qty: 4 }] }) });
+  assert.equal(joined.status, 200);
+  assert.ok(joined.data.members.includes('Timeless Coffee'));
+  const deals = await api('/api/groups');
+  const deal = deals.data.find((d) => d.groupId === created.data.id && d.itemId === 'matcha');
+  assert.ok(deal);
+  assert.equal(deal.pooledQty, 4);
+  assert.equal(deal.tier, 0);
+  const missing = await api('/api/groups/grp-nope/join', { method: 'POST', body: JSON.stringify({ cafeName: 'X' }) });
+  assert.equal(missing.status, 404);
+  const bad = await api(`/api/groups/${encodeURIComponent(created.data.id)}/join`, { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(bad.status, 400);
+});
+
+test('v11 group order validation does not hit PayPal', async () => {
+  const noGroup = await api('/api/groups/grp-nope/order', { method: 'POST', body: JSON.stringify({ itemId: 'matcha' }) });
+  assert.equal(noGroup.status, 404);
+  const badItem = await api('/api/groups/grp-bay-area/order', { method: 'POST', body: JSON.stringify({ itemId: 'nope' }) });
+  assert.equal(badItem.status, 400);
+  const noIntent = await api('/api/groups/grp-bay-area/order', { method: 'POST', body: JSON.stringify({ itemId: 'barista-scale' }) });
+  assert.equal(noIntent.status, 400);
+  assert.equal(noIntent.data.error, 'NO_POOLED_QTY');
+});
+
+test('v11 group-buying tools are registered for the LLM', () => {
+  const { llmTools } = require('./server');
+  for (const name of ['create_buying_group', 'join_buying_group', 'check_group_deals', 'place_group_order']) {
+    assert.ok(llmTools.find((t) => t.function.name === name), `${name} missing`);
+  }
+  assert.equal(llmTools.length, 25);
+});
+
+test('v11 agent group-deals intent reports pooled qty, tier and savings', async () => {
+  const { data } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-group', message: 'What are the group deals?' }) });
+  assert.match(data.reply, /Tier 2/);
+  assert.match(data.reply, /25/);
+  assert.match(data.reply, /101\.25/);
+});
+
+test('v11 agent create + join group intents work end to end', async () => {
+  const { data: created } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-group2', message: 'Create a buying group called Test Roasters' }) });
+  assert.match(created.reply, /Test Roasters/);
+  const { data: joined } = await api('/api/agent', { method: 'POST', body: JSON.stringify({ session: 'test-group2', message: 'Join the buying group as Timeless Coffee with 10 matcha' }) });
+  assert.match(joined.reply, /Timeless Coffee/);
+  assert.match(joined.reply, /Tier 1/);
+});
+
+test('v11 completeGroupOrder splits payables per café and stocks only our share', () => {
+  const { completeGroupOrder, createBuyingGroup, joinBuyingGroup, groupOrders, payables, inventoryView } = require('./server');
+  // A dedicated group (not the seed group — earlier tests may have joined it).
+  const g = createBuyingGroup({ name: 'Test Group', city: 'Test City', focus: 'matcha' });
+  joinBuyingGroup(g.id, 'Philz Coffee — Mission', [{ itemId: 'matcha', qty: 10 }]);
+  joinBuyingGroup(g.id, 'Sightglass Coffee — SoMa', [{ itemId: 'matcha', qty: 9 }]);
+  joinBuyingGroup(g.id, 'Blue Bottle Coffee — Hayes Valley', [{ itemId: 'matcha', qty: 6 }]);
+  // A fake CREATED group order, as if PayPal had issued it.
+  const id = 'TEST-GROUP-ORDER-1';
+  groupOrders.set(id, { groupId: g.id, itemId: 'matcha', pooledQty: 25, tier: 2, unitPrice: 36.45, status: 'CREATED', createdAt: new Date().toISOString(), expectedDelivery: '2026-11-10' });
+  const before = inventoryView().find((r) => r.id === 'matcha').stock;
+  const out = completeGroupOrder(id);
+  assert.ok(out);
+  assert.equal(out.ourShareQty, 6);
+  assert.equal(out.payables.length, 3);
+  const ours = out.payables.find((p) => p.cafeName === 'Blue Bottle Coffee — Hayes Valley');
+  assert.equal(ours.amount, 218.70);
+  assert.equal(ours.supplier, 'Kyoto Tea Imports');
+  assert.ok(payables.has(ours.id));
+  const after = inventoryView().find((r) => r.id === 'matcha').stock;
+  assert.equal(after, before + 6); // only OUR share, not the pooled 25
+  assert.equal(completeGroupOrder(id), null); // idempotent — second call is a no-op
+});
+
+test('v11 demo reset restores the seed group intents', async () => {
+  const { status } = await api('/api/demo/reset', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(status, 200);
+  const { data } = await api('/api/groups');
+  const matcha = data.find((d) => d.itemId === 'matcha' && d.groupId === 'grp-bay-area');
+  assert.equal(matcha.pooledQty, 25);
+  assert.equal(matcha.tier, 2);
 });

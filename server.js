@@ -132,13 +132,17 @@ CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, sessionId TEXT, items TE
 CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, orderId TEXT, invoiceId TEXT NOT NULL, status TEXT NOT NULL, recipient TEXT, total REAL NOT NULL, createdAt TEXT NOT NULL, invoiceUrl TEXT, dueDate TEXT, lastRemindedAt TEXT);
 CREATE TABLE IF NOT EXISTS inventory (productId TEXT PRIMARY KEY, stock REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS price_history (productId TEXT NOT NULL, price REAL NOT NULL, recordedAt TEXT NOT NULL, source TEXT NOT NULL, UNIQUE(productId, recordedAt));
-CREATE TABLE IF NOT EXISTS payables (id TEXT PRIMARY KEY, orderId TEXT NOT NULL, supplier TEXT NOT NULL, amount REAL NOT NULL, dueDate TEXT NOT NULL, terms TEXT NOT NULL, status TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS payables (id TEXT PRIMARY KEY, orderId TEXT NOT NULL, supplier TEXT NOT NULL, amount REAL NOT NULL, dueDate TEXT NOT NULL, terms TEXT NOT NULL, status TEXT NOT NULL, cafeName TEXT);
 CREATE TABLE IF NOT EXISTS restock_plans (id TEXT PRIMARY KEY, name TEXT NOT NULL, dayOfWeek INTEGER NOT NULL, budget REAL NOT NULL, active INTEGER NOT NULL, lastRunAt TEXT, createdAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS waste (id INTEGER PRIMARY KEY AUTOINCREMENT, productId TEXT NOT NULL, qty REAL NOT NULL, cost REAL NOT NULL, wastedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscription_plans (amount REAL PRIMARY KEY, planId TEXT NOT NULL, productId TEXT NOT NULL, createdAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, planId TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL, boxItems TEXT NOT NULL, createdAt TEXT NOT NULL, lastFulfilledAt TEXT, nextBillingDate TEXT);
-CREATE TABLE IF NOT EXISTS webhook_events (id TEXT PRIMARY KEY, eventType TEXT NOT NULL, resourceId TEXT, receivedAt TEXT NOT NULL, handled INTEGER NOT NULL, summary TEXT);`);
+CREATE TABLE IF NOT EXISTS webhook_events (id TEXT PRIMARY KEY, eventType TEXT NOT NULL, resourceId TEXT, receivedAt TEXT NOT NULL, handled INTEGER NOT NULL, summary TEXT);
+CREATE TABLE IF NOT EXISTS buying_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, city TEXT NOT NULL, focus TEXT NOT NULL, createdAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS group_members (groupId TEXT NOT NULL, cafeName TEXT NOT NULL, joinedAt TEXT NOT NULL, PRIMARY KEY(groupId, cafeName));
+CREATE TABLE IF NOT EXISTS group_intents (groupId TEXT NOT NULL, cafeName TEXT NOT NULL, itemId TEXT NOT NULL, qty INTEGER NOT NULL, PRIMARY KEY(groupId, cafeName, itemId));
+CREATE TABLE IF NOT EXISTS group_orders (id TEXT PRIMARY KEY, groupId TEXT NOT NULL, itemId TEXT NOT NULL, pooledQty INTEGER NOT NULL, tier INTEGER NOT NULL, unitPrice REAL NOT NULL, status TEXT NOT NULL, createdAt TEXT NOT NULL);`);
 // Orders gained columns in v3/v4; add them to older databases.
 for (const col of ['expectedDelivery TEXT', 'saved REAL', 'preventedStockouts INTEGER']) {
   try { db.exec(`ALTER TABLE orders ADD COLUMN ${col}`); } catch { /* already there */ }
@@ -147,6 +151,8 @@ for (const col of ['expectedDelivery TEXT', 'saved REAL', 'preventedStockouts IN
 for (const col of ['dueDate TEXT', 'lastRemindedAt TEXT']) {
   try { db.exec(`ALTER TABLE invoices ADD COLUMN ${col}`); } catch { /* already there */ }
 }
+// Payables gained a café column in v11 (group-buying shares are owed per café).
+try { db.exec('ALTER TABLE payables ADD COLUMN cafeName TEXT'); } catch { /* already there */ }
 
 const carts = new Map();  // sessionId -> Map(productId -> qty)
 const orders = new Map(); // paypalOrderId -> { sessionId, items, total, status, createdAt }
@@ -197,10 +203,10 @@ for (const row of db.prepare('SELECT * FROM subscriptions ORDER BY createdAt DES
 // Payables: what the café owes each supplier for captured orders.
 const payables = new Map(); // payableId -> { orderId, supplier, amount, dueDate, terms, status }
 function savePayable(row) {
-  db.prepare('INSERT OR IGNORE INTO payables (id, orderId, supplier, amount, dueDate, terms, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(row.id, row.orderId, row.supplier, row.amount, row.dueDate, row.terms, row.status);
+  db.prepare('INSERT OR IGNORE INTO payables (id, orderId, supplier, amount, dueDate, terms, status, cafeName) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(row.id, row.orderId, row.supplier, row.amount, row.dueDate, row.terms, row.status, row.cafeName || null);
 }
 for (const row of db.prepare('SELECT * FROM payables').all()) {
-  payables.set(row.id, { orderId: row.orderId, supplier: row.supplier, amount: row.amount, dueDate: row.dueDate, terms: row.terms, status: row.status });
+  payables.set(row.id, { orderId: row.orderId, supplier: row.supplier, amount: row.amount, dueDate: row.dueDate, terms: row.terms, status: row.status, ...(row.cafeName ? { cafeName: row.cafeName } : {}) });
 }
 function createPayablesForOrder(orderId) {
   const rec = orders.get(orderId);
@@ -473,6 +479,243 @@ function payablesForOrder(rec, orderId) {
   });
 }
 
+/* ------------------------------------------- group buying (v11) */
+// Several cafés pool one order to unlock a wholesale tier price from the
+// supplier. Tiers are per item, on the pooled quantity across all member
+// cafés — the discount applies to the best-supplier price the café would
+// pay solo, so the saving is real money vs ordering alone.
+//   Tier 0: pooled < 10  → no discount
+//   Tier 1: pooled 10–24 → 5% off
+//   Tier 2: pooled >= 25 → 10% off
+const GROUP_TIERS = [
+  { tier: 0, minQty: 0, discountPct: 0 },
+  { tier: 1, minQty: 10, discountPct: 5 },
+  { tier: 2, minQty: 25, discountPct: 10 },
+];
+const OUR_CAFE = 'Blue Bottle Coffee — Hayes Valley';
+function groupTier(pooledQty) {
+  let found = GROUP_TIERS[0];
+  for (const t of GROUP_TIERS) if (pooledQty >= t.minQty) found = t;
+  return found;
+}
+function groupUnitPrice(product, pooledQty) {
+  const base = bestSupplier(product).price;
+  const { discountPct } = groupTier(pooledQty);
+  return Math.round(base * (1 - discountPct / 100) * 100) / 100;
+}
+
+const buyingGroups = new Map(); // groupId -> { name, city, focus, createdAt }
+const groupMembers = new Map(); // groupId -> Map(cafeName -> joinedAt)
+const groupIntents = new Map(); // groupId -> Map(`${cafeName}|${itemId}` -> qty)
+const groupOrders = new Map(); // paypalOrderId -> { groupId, itemId, pooledQty, tier, unitPrice, status, createdAt }
+function saveGroup(id, rec) {
+  db.prepare('INSERT INTO buying_groups (id, name, city, focus, createdAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, city=excluded.city, focus=excluded.focus').run(id, rec.name, rec.city, rec.focus, rec.createdAt);
+}
+function saveGroupMember(groupId, cafeName, joinedAt) {
+  db.prepare('INSERT OR IGNORE INTO group_members (groupId, cafeName, joinedAt) VALUES (?, ?, ?)').run(groupId, cafeName, joinedAt);
+}
+function saveGroupIntent(groupId, cafeName, itemId, qty) {
+  db.prepare('INSERT INTO group_intents (groupId, cafeName, itemId, qty) VALUES (?, ?, ?, ?) ON CONFLICT(groupId, cafeName, itemId) DO UPDATE SET qty=excluded.qty').run(groupId, cafeName, itemId, qty);
+}
+function saveGroupOrder(id, rec) {
+  db.prepare('INSERT INTO group_orders (id, groupId, itemId, pooledQty, tier, unitPrice, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status').run(id, rec.groupId, rec.itemId, rec.pooledQty, rec.tier, rec.unitPrice, rec.status, rec.createdAt);
+}
+for (const row of db.prepare('SELECT * FROM buying_groups').all()) {
+  buyingGroups.set(row.id, { name: row.name, city: row.city, focus: row.focus, createdAt: row.createdAt });
+}
+for (const row of db.prepare('SELECT * FROM group_members').all()) {
+  if (!groupMembers.has(row.groupId)) groupMembers.set(row.groupId, new Map());
+  groupMembers.get(row.groupId).set(row.cafeName, row.joinedAt);
+}
+for (const row of db.prepare('SELECT * FROM group_intents').all()) {
+  if (!groupIntents.has(row.groupId)) groupIntents.set(row.groupId, new Map());
+  groupIntents.get(row.groupId).set(`${row.cafeName}|${row.itemId}`, row.qty);
+}
+for (const row of db.prepare('SELECT * FROM group_orders').all()) {
+  groupOrders.set(row.id, { groupId: row.groupId, itemId: row.itemId, pooledQty: row.pooledQty, tier: row.tier, unitPrice: row.unitPrice, status: row.status, createdAt: row.createdAt });
+}
+// Demo seed group (v11): our café pools matcha and oat milk with two
+// other Bay Area specialty cafés. The other members are DEMO members —
+// real brand names used illustratively, not real participants (see README).
+// Their intents are what make the pooled tiers visible in the demo.
+const SEED_GROUP = {
+  id: 'grp-bay-area',
+  name: 'Bay Area Specialty Cafés',
+  city: 'San Francisco Bay Area',
+  focus: 'coffee beans & matcha',
+  members: [
+    { cafe: OUR_CAFE, intents: [{ itemId: 'matcha', qty: 6 }, { itemId: 'oat-milk', qty: 8 }] },
+    { cafe: 'Philz Coffee — Mission', intents: [{ itemId: 'matcha', qty: 10 }, { itemId: 'oat-milk', qty: 7 }] },
+    { cafe: 'Sightglass Coffee — SoMa', intents: [{ itemId: 'matcha', qty: 9 }, { itemId: 'oat-milk', qty: 5 }] },
+  ],
+};
+function seedGroupMembers() {
+  // (Re)create the seed group's members + intents from scratch — used at
+  // startup and by the demo reset, so the group deals always come back.
+  groupMembers.set(SEED_GROUP.id, new Map());
+  groupIntents.set(SEED_GROUP.id, new Map());
+  db.prepare('DELETE FROM group_members WHERE groupId=?').run(SEED_GROUP.id);
+  db.prepare('DELETE FROM group_intents WHERE groupId=?').run(SEED_GROUP.id);
+  const createdAt = new Date().toISOString();
+  for (const m of SEED_GROUP.members) {
+    groupMembers.get(SEED_GROUP.id).set(m.cafe, createdAt);
+    saveGroupMember(SEED_GROUP.id, m.cafe, createdAt);
+    for (const it of m.intents) {
+      groupIntents.get(SEED_GROUP.id).set(`${m.cafe}|${it.itemId}`, it.qty);
+      saveGroupIntent(SEED_GROUP.id, m.cafe, it.itemId, it.qty);
+    }
+  }
+}
+function seedBuyingGroups() {
+  if (buyingGroups.has(SEED_GROUP.id)) return;
+  const createdAt = new Date().toISOString();
+  buyingGroups.set(SEED_GROUP.id, { name: SEED_GROUP.name, city: SEED_GROUP.city, focus: SEED_GROUP.focus, createdAt });
+  saveGroup(SEED_GROUP.id, buyingGroups.get(SEED_GROUP.id));
+  seedGroupMembers();
+}
+seedBuyingGroups();
+
+// Flat deal rows for the dashboard grid + the agent: one row per
+// (group, item) with pooled quantity, tier, unit price, solo price,
+// saving vs ordering alone, members, and the latest group-order status.
+function groupDeals() {
+  const rows = [];
+  for (const [groupId, g] of buyingGroups) {
+    const members = [...(groupMembers.get(groupId) || new Map()).keys()];
+    const intents = groupIntents.get(groupId) || new Map();
+    const byItem = new Map();
+    for (const [key, qty] of intents) {
+      const itemId = key.split('|').slice(1).join('|');
+      const cafe = key.slice(0, key.length - itemId.length - 1);
+      if (!byItem.has(itemId)) byItem.set(itemId, []);
+      byItem.get(itemId).push({ cafe, qty });
+    }
+    for (const [itemId, shares] of byItem) {
+      const p = productById(itemId);
+      if (!p) continue;
+      const pooledQty = shares.reduce((s, x) => s + x.qty, 0);
+      const soloPrice = bestSupplier(p).price;
+      const { tier, discountPct } = groupTier(pooledQty);
+      const unitPrice = groupUnitPrice(p, pooledQty);
+      const latest = [...groupOrders.values()]
+        .filter((o) => o.groupId === groupId && o.itemId === itemId)
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))[0];
+      rows.push({
+        groupId, groupName: g.name, city: g.city, focus: g.focus,
+        itemId, itemName: p.name, emoji: p.emoji,
+        pooledQty, tier, discountPct, unitPrice, soloPrice,
+        savings: Math.round((soloPrice - unitPrice) * pooledQty * 100) / 100,
+        members, memberCount: members.length,
+        shares: shares.map((s) => ({ cafe: s.cafe, qty: s.qty, amount: Math.round(s.qty * unitPrice * 100) / 100 })),
+        orderStatus: latest ? latest.status : 'OPEN',
+        orderId: latest ? [...groupOrders.entries()].find(([, o]) => o === latest)?.[0] || null : null,
+      });
+    }
+  }
+  return rows.sort((a, b) => b.savings - a.savings);
+}
+function createBuyingGroup({ name, city, focus, items }) {
+  const id = `grp-${Date.now().toString(36)}`;
+  const rec = { name: name.slice(0, 80), city: (city || CAFE.location).slice(0, 80), focus: (focus || 'coffee & tea').slice(0, 80), createdAt: new Date().toISOString() };
+  buyingGroups.set(id, rec);
+  saveGroup(id, rec);
+  groupMembers.set(id, new Map([[OUR_CAFE, rec.createdAt]]));
+  saveGroupMember(id, OUR_CAFE, rec.createdAt);
+  groupIntents.set(id, new Map());
+  if (items) for (const it of items) addGroupIntent(id, OUR_CAFE, it.itemId, it.qty);
+  return { id, ...rec, members: [OUR_CAFE] };
+}
+function addGroupIntent(groupId, cafeName, itemId, qty) {
+  const p = productById(itemId);
+  const q = Math.max(1, Math.min(999, Math.round(Number(qty || 0))));
+  if (!p || !(q > 0)) return false;
+  if (!groupIntents.has(groupId)) groupIntents.set(groupId, new Map());
+  groupIntents.get(groupId).set(`${cafeName}|${itemId}`, q);
+  saveGroupIntent(groupId, cafeName, itemId, q);
+  return true;
+}
+function joinBuyingGroup(groupId, cafeName, items) {
+  if (!buyingGroups.has(groupId)) throw new Error('NOT_FOUND');
+  const name = String(cafeName || '').trim().slice(0, 80);
+  if (!name) throw new Error('INVALID_INPUT');
+  const joinedAt = new Date().toISOString();
+  if (!groupMembers.has(groupId)) groupMembers.set(groupId, new Map());
+  groupMembers.get(groupId).set(name, joinedAt);
+  saveGroupMember(groupId, name, joinedAt);
+  if (items) for (const it of items) addGroupIntent(groupId, name, it.itemId, it.qty);
+  return { groupId, cafeName: name, members: [...groupMembers.get(groupId).keys()] };
+}
+async function createGroupPayPalOrder(groupId, itemId) {
+  if (!buyingGroups.has(groupId)) throw new Error('NOT_FOUND');
+  const deal = groupDeals().find((d) => d.groupId === groupId && d.itemId === itemId);
+  if (!deal || deal.pooledQty < 1) throw new Error('NO_POOLED_QTY');
+  if (!paypalConfigured) throw new Error('PAYPAL_NOT_CONFIGURED');
+  const p = productById(itemId);
+  const best = bestSupplier(p);
+  const token = await paypalAccessToken();
+  const total = (deal.unitPrice * deal.pooledQty).toFixed(2);
+  const body = {
+    intent: 'CAPTURE',
+    purchase_units: [{
+      reference_id: `agentmart-group-${groupId}`,
+      description: `AgentMart group order — ${deal.pooledQty}× ${p.name} at the Tier ${deal.tier} group price (${deal.memberCount} cafés)`,
+      amount: { currency_code: 'USD', value: total, breakdown: { item_total: { currency_code: 'USD', value: total } } },
+      items: [{ name: p.name.slice(0, 127), unit_amount: { currency_code: 'USD', value: deal.unitPrice.toFixed(2) }, quantity: String(deal.pooledQty) }],
+    }],
+    application_context: {
+      brand_name: 'AgentMart',
+      user_action: 'PAY_NOW',
+      return_url: `${BASE_URL}/paypal/return`,
+      cancel_url: `${BASE_URL}/paypal/cancel`,
+    },
+  };
+  const res = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`PayPal create group order failed (${res.status}): ${await res.text()}`);
+  const order = await res.json();
+  const approveUrl = (order.links || []).find((l) => l.rel === 'approve')?.href;
+  const rec = { groupId, itemId, pooledQty: deal.pooledQty, tier: deal.tier, unitPrice: deal.unitPrice, status: 'CREATED', createdAt: new Date().toISOString(), expectedDelivery: expectedDeliveryDate([{ leadTimeDays: best.leadTimeDays }]) };
+  groupOrders.set(order.id, rec);
+  saveGroupOrder(order.id, rec);
+  // Spread the deal FIRST: it carries orderId: null / orderStatus: 'OPEN'
+  // from before the order existed, and must not overwrite the real id.
+  return { ...deal, orderId: order.id, approveUrl, expectedDelivery: rec.expectedDelivery, total: Number(total) };
+}
+// A captured group order means: the pooled delivery arrived. Each member
+// café owes its own share to the supplier (payables per café), and OUR
+// café's share goes onto our shelf. Idempotent — a second call is a no-op.
+function completeGroupOrder(paypalOrderId) {
+  const rec = groupOrders.get(paypalOrderId);
+  if (!rec || rec.status === 'COMPLETED') return null;
+  const p = productById(rec.itemId);
+  if (!p) return null;
+  rec.status = 'COMPLETED';
+  saveGroupOrder(paypalOrderId, rec);
+  const deal = groupDeals().find((d) => d.groupId === rec.groupId && d.itemId === rec.itemId);
+  const shares = deal ? deal.shares : [];
+  const supplier = bestSupplier(p).name;
+  const base = rec.expectedDelivery || new Date().toISOString().slice(0, 10);
+  const t = supplierTerms(supplier);
+  const created = [];
+  for (const s of shares) {
+    const row = { id: `pay-${paypalOrderId}-${s.cafe.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, orderId: paypalOrderId, supplier, amount: Math.round(s.qty * rec.unitPrice * 100) / 100, dueDate: addDays(base, t.days), terms: t.terms, status: 'UNPAID', cafeName: s.cafe };
+    if (!payables.has(row.id)) {
+      payables.set(row.id, row);
+      savePayable(row);
+      created.push(row);
+    }
+  }
+  const ourShare = shares.find((s) => s.cafe === OUR_CAFE);
+  if (ourShare) {
+    inventory.set(p.id, (inventory.get(p.id) ?? p.stock) + ourShare.qty);
+    saveStock(p.id);
+  }
+  return { groupOrder: rec, payables: created, ourShareQty: ourShare?.qty || 0 };
+}
+
 function getCart(session) {
   if (!carts.has(session)) carts.set(session, new Map());
   return carts.get(session);
@@ -613,6 +856,9 @@ async function capturePayPalOrder(orderId) {
     // delivered quantities to stock (once per order).
     if (wasCaptured && rec.status === 'COMPLETED') applyOrderDelivery(orderId, rec);
   }
+  // v11: a captured GROUP order completes the pooled delivery — payables
+  // per member café, and our café's share goes onto our shelf.
+  if (data.status === 'COMPLETED') completeGroupOrder(orderId);
   return data;
 }
 
@@ -979,6 +1225,7 @@ async function handleWebhookEvent(event) {
       }
     } else if (action.kind === 'order-approved') {
       const rec = orders.get(action.orderId);
+      const groupRec = groupOrders.get(action.orderId);
       if (rec && rec.status === 'CREATED') {
         try {
           await capturePayPalOrder(action.orderId);
@@ -995,6 +1242,24 @@ async function handleWebhookEvent(event) {
                 rec.status = 'COMPLETED';
                 saveOrder(action.orderId, rec);
                 applyOrderDelivery(action.orderId, rec);
+                handled = true;
+              }
+            }
+          } catch { /* leave for the return-URL flow */ }
+        }
+      } else if (groupRec && groupRec.status === 'CREATED') {
+        // v11: same auto-capture for a pooled group order.
+        try {
+          await capturePayPalOrder(action.orderId);
+          handled = true;
+        } catch (e) {
+          try {
+            const token = await paypalAccessToken();
+            const res = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${action.orderId}`, { headers: { Authorization: `Bearer ${token}` } });
+            if (res.ok) {
+              const live = await res.json();
+              if (live.status === 'COMPLETED') {
+                completeGroupOrder(action.orderId);
                 handled = true;
               }
             }
@@ -1152,8 +1417,12 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'fulfill_subscription', description: 'Fulfill this week\'s box for an ACTIVE weekly restock subscription: smart restock within the subscription amount and create the PayPal checkout. Use when the user asks to fulfill this week\'s subscription box.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'check_recent_events', description: 'List recent PayPal webhook events received by the server (subscription activated/cancelled, invoice paid, order approved, sale completed) with their time and whether they were handled. Use when the user asks about recent payments or webhook events.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'revise_subscription', description: 'Revise an ACTIVE weekly restock subscription to a new weekly amount (or re-size the box from today\'s burn rate when no amount is given): create the new billing plan and revise the subscription on PayPal. A price rise needs the buyer to approve via the returned link; a price drop applies at once. Use when the user asks to revise or change their subscription or weekly box price.', parameters: { type: 'object', properties: { subscriptionId: { type: 'string' }, amount: { type: 'number' } } } } },
+  { type: 'function', function: { name: 'create_buying_group', description: 'Create a group-buying group: several cafés pool one order to unlock a wholesale tier price (5% off at 10+ units, 10% off at 25+ units per item). Our café joins automatically. Use when the user asks to start or create a buying group.', parameters: { type: 'object', properties: { name: { type: 'string' }, city: { type: 'string' }, focus: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'join_buying_group', description: 'Join a buying group as a café, optionally committing to buy quantities of items (the pooled quantity sets the tier price). Use when the user asks for a café to join a buying group.', parameters: { type: 'object', properties: { groupId: { type: 'string' }, cafeName: { type: 'string' }, items: { type: 'array', items: { type: 'object', properties: { itemId: { type: 'string' }, qty: { type: 'number' } } } } } } } },
+  { type: 'function', function: { name: 'check_group_deals', description: 'Check group-buying deals: for each group and item, the pooled quantity across member cafés, the tier price (5% off at 10+, 10% off at 25+), the solo price, and the saving vs ordering alone. Use when the user asks about group deals or group buying prices.', parameters: { type: 'object', properties: { groupId: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'place_group_order', description: 'Place a pooled group order on PayPal at the tier price: one PayPal checkout for the pooled quantity, with each member café owing its own share (payables per café). Use when the user asks to place or order the group buy.', parameters: { type: 'object', properties: { groupId: { type: 'string' }, itemId: { type: 'string' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks about prices going down or getting cheaper, call check_price_drops first and name the items that dropped more than 5% in 3 months — a falling price is a good time to stock up, and smart restock already buys at the current lower price. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks what is overdue or past due, call check_overdue_invoices first and list the overdue SENT invoices (with days overdue) and the overdue payables. When the user asks to remind, nudge or chase a customer about an unpaid invoice, call remind_invoice once (with the invoice id from their message when given, otherwise the most overdue SENT invoice) and confirm the reminder was sent — only SENT invoices can be reminded, so if there is none, say so instead of inventing one. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks about prices going down or getting cheaper, call check_price_drops first and name the items that dropped more than 5% in 3 months — a falling price is a good time to stock up, and smart restock already buys at the current lower price. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks what is overdue or past due, call check_overdue_invoices first and list the overdue SENT invoices (with days overdue) and the overdue payables. When the user asks to remind, nudge or chase a customer about an unpaid invoice, call remind_invoice once (with the invoice id from their message when given, otherwise the most overdue SENT invoice) and confirm the reminder was sent — only SENT invoices can be reminded, so if there is none, say so instead of inventing one. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks about group buying or group deals, call check_group_deals first and report the pooled quantity, the tier price and the saving vs ordering alone for each item. When the user asks to start or create a buying group, call create_buying_group once. When the user asks for a café to join a buying group, call join_buying_group once with the café name and the items and quantities it commits to. When the user asks to place the group order, call place_group_order once and tell them the pooled quantity, the tier price, the PayPal order id and to approve on PayPal sandbox — each member café owes its own share after capture. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -1273,6 +1542,27 @@ async function executeLlmTool(session, name, args) {
     if (!id) return { message: 'No ACTIVE subscription to revise — set one up and approve it on PayPal first.' };
     const amount = typeof args.amount === 'number' && args.amount > 0 ? args.amount : undefined;
     return reviseSubscription(id, amount);
+  }
+  if (name === 'create_buying_group') {
+    return createBuyingGroup({ name: args.name || 'Bay Area Coffee Buyers', city: args.city, focus: args.focus });
+  }
+  if (name === 'join_buying_group') {
+    const id = args.groupId || [...buyingGroups.keys()][0];
+    if (!id) return { message: 'No buying group exists yet — create one first.' };
+    if (!args.cafeName) return { message: 'Which café is joining? Give me the café name, for example "join the buying group as Philz Coffee".' };
+    return joinBuyingGroup(id, args.cafeName, args.items);
+  }
+  if (name === 'check_group_deals') {
+    const deals = groupDeals();
+    return { deals: args.groupId ? deals.filter((d) => d.groupId === args.groupId) : deals };
+  }
+  if (name === 'place_group_order') {
+    const deals = groupDeals();
+    const deal = args.groupId && args.itemId
+      ? deals.find((d) => d.groupId === args.groupId && d.itemId === args.itemId)
+      : args.itemId ? deals.find((d) => d.itemId === args.itemId) : deals[0];
+    if (!deal) return { message: 'No group deal to order — check the group deals first.' };
+    return createGroupPayPalOrder(deal.groupId, deal.itemId);
   }
   return { error: 'UNKNOWN_TOOL' };
 }
@@ -1529,6 +1819,54 @@ async function runAgent(session, rawMessage) {
     const budget = budgetMatch ? Number(budgetMatch[1]) : 60;
     const plan = createPlan({ name: `Weekly restock — ${DAY_NAMES[day]}`, dayOfWeek: day, budget });
     return { reply: `Done — weekly restock plan "${plan.name}" created: every ${DAY_NAMES[day]}, budget ${money(budget)}. Next run: ${planView(plan).nextRun}. Say "run my weekly restock" any time and I will execute it. (Plans run when you ask — there is no background cron on the free demo host.)` };
+  }
+
+  // Group buying (v11): "what are the group deals?" / "create a buying
+  // group" / "join the buying group as X" / "place the group order".
+  if (/(buying group|group buy|group deal|group order|gộp đơn|gop don)/.test(msg)) {
+    const dealsReply = () => {
+      const deals = groupDeals();
+      if (!deals.length) return 'No buying group exists yet — say "create a buying group" and I will set one up.';
+      const lines = deals.map((d) => `${d.emoji} ${d.itemName} — pooled ${d.pooledQty} units across ${d.memberCount} cafés (${d.members.join(', ')}) → Tier ${d.tier} (−${d.discountPct}%), ${money(d.unitPrice)} each instead of ${money(d.soloPrice)} — saves ${money(d.savings)} vs ordering alone${d.orderStatus !== 'OPEN' ? ` — latest group order ${d.orderStatus}` : ''}`).join('\n');
+      return `Group-buying deals (5% off at 10+ units, 10% off at 25+):\n${lines}\n\nSay "place the group order for matcha" and I will order the pooled quantity on PayPal — each café owes only its own share.`;
+    };
+    if (/(place|order|checkout|pay).*(group|pooled)|place the group/.test(msg)) {
+      const stripped = msg.replace(/(place|order|checkout|pay|the|group|buying|pooled|for|a|an)/gi, ' ');
+      const p = stripped.replace(/[^a-z]/gi, '').length >= 3 ? matchOneProduct(stripped) : null;
+      const deals = groupDeals();
+      const deal = p ? deals.find((d) => d.itemId === p.id) : deals[0];
+      if (!deal) return { reply: 'No group deal to order — check the group deals first.' };
+      try {
+        const out = await createGroupPayPalOrder(deal.groupId, deal.itemId);
+        return { reply: `Group order placed: ${out.pooledQty}× ${out.itemName} at the Tier ${out.tier} price of ${money(out.unitPrice)} (was ${money(out.soloPrice)}), total ${money(out.total)} — saved ${money(out.savings)} vs ordering alone. PayPal order ${out.orderId} — approve it on PayPal sandbox. After capture, each café owes only its own share: ${out.shares.map((s) => `${s.cafe} ${money(s.amount)}`).join(', ')}.`, checkoutUrl: out.approveUrl, orderId: out.orderId };
+      } catch (e) {
+        if (e.message === 'PAYPAL_NOT_CONFIGURED') return { reply: 'PayPal sandbox is not configured on this server yet.' };
+        throw e;
+      }
+    }
+    if (/(create|start|set up|setup|make).*(buying group|group)/.test(msg)) {
+      const nameMatch = msg.match(/(?:called|named)\s+["']?([^"']+)/);
+      const focusMatch = msg.match(/for\s+(matcha|oat|coffee|tea|beans)/);
+      const g = createBuyingGroup({ name: nameMatch ? nameMatch[1].trim().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Bay Area Coffee Buyers', city: CAFE.location, focus: focusMatch ? focusMatch[1] : 'coffee & tea' });
+      return { reply: `Buying group "${g.name}" created (${g.city}, focus: ${g.focus}) — ${OUR_CAFE} joined automatically. Other cafés can join with "join the buying group as <café name>" and commit quantities; at 10+ pooled units the price drops 5%, at 25+ it drops 10%.` };
+    }
+    if (/join/.test(msg)) {
+      const afterAs = msg.match(/join(?: the)?(?: buying group)? as\s+(.+)/);
+      const cafeName = afterAs ? afterAs[1].replace(/\s+(with|for|buying|to buy|committing)\b.*$/, '').trim() : '';
+      if (!cafeName) return { reply: 'Which café is joining? For example: "join the buying group as Philz Coffee with 10 matcha".' };
+      const items = [];
+      const keywords = { 'arabica-beans': 'arabica', 'robusta-beans': 'robusta', 'pourover-set': 'dripper', 'coldbrew-bottle': 'cold brew', 'matcha': 'matcha', 'instant-coffee': 'instant', 'oat-milk': 'oat', 'barista-scale': 'scale' };
+      for (const p of PRODUCTS) {
+        const keyword = keywords[p.id] || p.id.split('-')[0];
+        const m = msg.match(new RegExp(`(\\d+)\\s*(?:x|×)?\\s*${keyword}`));
+        if (m) items.push({ itemId: p.id, qty: Number(m[1]) });
+      }
+      const id = [...buyingGroups.keys()][0];
+      if (!id) return { reply: 'No buying group exists yet — say "create a buying group" first.' };
+      const out = joinBuyingGroup(id, cafeName.replace(/\b\w/g, (c) => c.toUpperCase()), items.length ? items : undefined);
+      return { reply: `${out.cafeName} joined "${buyingGroups.get(id).name}"${items.length ? `, committing to ${items.map((i) => `${i.qty}× ${productById(i.itemId).name}`).join(', ')}` : ''}. ${dealsReply()}` };
+    }
+    return { reply: dealsReply() };
   }
 
   // Price drops (v10): "did any prices go down?" — must run BEFORE the
@@ -1850,16 +2188,50 @@ app.post('/api/inventory/:id/adjust', (req, res) => {
   saveStock(p.id);
   res.json(inventoryView().find((r) => r.id === p.id));
 });
+// Group buying (v11): flat deal rows for the grid, create/join, and the
+// pooled PayPal order (leave it CREATED — the buyer approves on PayPal).
+app.get('/api/groups', (req, res) => res.json(groupDeals()));
+app.post('/api/groups', (req, res) => {
+  const { name, city, focus } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'INVALID_INPUT', message: 'name is required.' });
+  res.status(201).json(createBuyingGroup({ name, city, focus }));
+});
+app.post('/api/groups/:id/join', (req, res) => {
+  const { cafeName, items } = req.body || {};
+  try {
+    res.json(joinBuyingGroup(req.params.id, cafeName, items));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    if (e.message === 'INVALID_INPUT') return res.status(400).json({ error: 'INVALID_INPUT', message: 'cafeName is required.' });
+    console.error(e);
+    res.status(502).json({ error: 'JOIN_FAILED', message: e.message });
+  }
+});
+app.post('/api/groups/:id/order', async (req, res) => {
+  const { itemId } = req.body || {};
+  if (!itemId || !productById(itemId)) return res.status(400).json({ error: 'INVALID_INPUT', message: 'a valid itemId is required.' });
+  try {
+    res.status(201).json(await createGroupPayPalOrder(req.params.id, itemId));
+  } catch (e) {
+    if (e.message === 'NOT_FOUND') return res.status(404).json({ error: 'NOT_FOUND' });
+    if (e.message === 'NO_POOLED_QTY') return res.status(400).json({ error: 'NO_POOLED_QTY', message: 'No pooled quantity for that item in this group.' });
+    if (e.message === 'PAYPAL_NOT_CONFIGURED') return res.status(503).json({ error: 'PAYPAL_NOT_CONFIGURED' });
+    console.error(e);
+    res.status(502).json({ error: 'GROUP_ORDER_FAILED', message: e.message });
+  }
+});
 app.post('/api/demo/reset', (req, res) => {
   // Reset the demo to its seed state before filming: stock back to seed,
-  // waste and carts cleared. Orders, payables and plans are real records
-  // and are kept.
+  // waste and carts cleared, and the seed buying group's members + intents
+  // restored so the group deals always come back. Orders, payables and
+  // plans are real records and are kept.
   for (const p of PRODUCTS) {
     inventory.set(p.id, p.stock);
     saveStock(p.id);
   }
   db.prepare('DELETE FROM waste').run();
   db.prepare('DELETE FROM carts').run();
+  seedGroupMembers();
   res.json({ inventory: inventoryView(), waste: wasteSummary() });
 });
 app.post('/api/reorder-last', async (req, res) => {
@@ -2038,4 +2410,4 @@ if (require.main === module) {
     registerPayPalWebhook().catch((e) => console.error('webhook: registration failed:', e.message));
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription, invoices, overdueInvoices, remindPayPalInvoice, CAFE };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription, invoices, overdueInvoices, remindPayPalInvoice, CAFE, groupTier, groupDeals, createBuyingGroup, joinBuyingGroup, createGroupPayPalOrder, completeGroupOrder, OUR_CAFE, buyingGroups, groupMembers, groupIntents, groupOrders, payables };

@@ -155,10 +155,32 @@ async function loadSubscriptions() {
 }
 
 let webhookGridApi;
+let groupsGridApi;
 async function loadWebhookEvents() {
   const { data } = await api('/api/webhook-events');
   const list = Array.isArray(data) ? data : [];
   if (webhookGridApi) webhookGridApi.setGridOption('rowData', list.map((e) => ({ ...e, receivedAt: e.receivedAt.slice(0, 19).replace('T', ' '), handled: e.handled ? 'handled' : 'logged' })));
+  return list;
+}
+
+// Group buying (v11): one row per deal — group, item, pooled qty, tier,
+// unit price vs solo price, saving, members, order status + order button.
+async function loadGroups() {
+  const { data } = await api('/api/groups');
+  const list = Array.isArray(data) ? data : [];
+  if (groupsGridApi) groupsGridApi.setGridOption('rowData', list.map((d) => ({
+    groupName: d.groupName,
+    city: d.city,
+    itemName: d.itemName,
+    pooledQty: d.pooledQty,
+    tier: `Tier ${d.tier} (−${d.discountPct}%)`,
+    unitPrice: Number(d.unitPrice),
+    soloPrice: Number(d.soloPrice),
+    savings: Number(d.savings),
+    members: d.members.join(', '),
+    orderStatus: d.orderStatus,
+    action: d.orderStatus === 'OPEN' ? `<button class="add-btn" data-group-order="${d.groupId}|${d.itemId}">Place group order</button>` : (d.orderId || '—'),
+  })));
   return list;
 }
 
@@ -198,6 +220,7 @@ async function loadAll() {
   await loadWaste();
   await loadSubscriptions();
   await loadWebhookEvents();
+  await loadGroups();
 }
 
 document.getElementById('adjustForm').addEventListener('submit', async (e) => {
@@ -382,6 +405,7 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     columnDefs: [
       { field: 'id', headerName: 'Payable id', filter: true, flex: 2 },
       { field: 'supplier', filter: true, flex: 2 },
+      { field: 'cafeName', headerName: 'Café', filter: true, flex: 2, valueFormatter: (p) => p.value || 'Blue Bottle Coffee' },
       { field: 'orderId', headerName: 'Order id', filter: true, flex: 2 },
       { field: 'amount', headerName: 'Amount (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
       { field: 'terms', filter: true, flex: 1 },
@@ -455,6 +479,61 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
     rowData: [],
   };
   webhookGridApi = agGrid.createGrid(document.getElementById('webhookGrid'), webhookOptions);
+
+  const groupsOptions = {
+    columnDefs: [
+      { field: 'groupName', headerName: 'Group', filter: true, flex: 2 },
+      { field: 'city', filter: true, flex: 1 },
+      { field: 'itemName', headerName: 'Item', filter: true, flex: 2 },
+      { field: 'pooledQty', headerName: 'Pooled qty', filter: 'agNumberColumnFilter', flex: 1 },
+      { field: 'tier', headerName: 'Tier', filter: true, flex: 1 },
+      { field: 'unitPrice', headerName: 'Group price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
+      { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
+      { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
+      { field: 'members', headerName: 'Members', filter: true, flex: 3 },
+      { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1 },
+      { field: 'action', headerName: '', flex: 2, cellRenderer: (p) => p.value || '' },
+    ],
+    defaultColDef: { sortable: true, resizable: true },
+    rowData: [],
+  };
+  groupsGridApi = agGrid.createGrid(document.getElementById('groupsGrid'), groupsOptions);
+
+  document.getElementById('groupsGrid').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-group-order]');
+    if (!b) return;
+    const [groupId, itemId] = b.dataset.groupOrder.split('|');
+    const msg = document.getElementById('groupMsg');
+    msg.textContent = 'Placing the group order…';
+    const { ok, data } = await api(`/api/groups/${encodeURIComponent(groupId)}/order`, { method: 'POST', body: JSON.stringify({ itemId }) });
+    msg.innerHTML = ok
+      ? `Group order placed: ${data.pooledQty}× ${data.itemName} at ${money(data.unitPrice)} (Tier ${data.tier}) — total ${money(data.total)}, saved ${money(data.savings)}. <a href="${data.approveUrl}" target="_blank" rel="noopener">Approve it on PayPal sandbox</a>.`
+      : (data.message || 'Could not place the group order.');
+    if (ok) loadAll();
+  });
+
+  document.getElementById('groupForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('groupMsg');
+    const name = document.getElementById('groupName').value.trim();
+    const city = document.getElementById('groupCity').value.trim();
+    const focus = document.getElementById('groupFocus').value.trim();
+    msg.textContent = 'Creating the group…';
+    const { ok, data } = await api('/api/groups', { method: 'POST', body: JSON.stringify({ name, city, focus }) });
+    msg.textContent = ok ? `Buying group "${data.name}" created — our café joined automatically.` : (data.message || 'Could not create the group.');
+    if (ok) loadAll();
+  });
+
+  document.getElementById('groupJoinForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('groupMsg');
+    const groupId = document.getElementById('joinGroupId').value.trim();
+    const cafeName = document.getElementById('joinCafeName').value.trim();
+    msg.textContent = 'Joining the group…';
+    const { ok, data } = await api(`/api/groups/${encodeURIComponent(groupId)}/join`, { method: 'POST', body: JSON.stringify({ cafeName }) });
+    msg.textContent = ok ? `${data.cafeName} joined the group.` : (data.message || 'Could not join the group.');
+    if (ok) loadAll();
+  });
 
   document.getElementById('subsGrid').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-sub-action]');
