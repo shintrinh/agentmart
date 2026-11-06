@@ -443,14 +443,14 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
 
   const subsOptions = {
     columnDefs: [
-      { field: 'id', headerName: 'Subscription id', filter: true, flex: 2 },
-      { field: 'status', filter: true, flex: 1 },
-      { field: 'amount', headerName: 'Per week (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
-      { field: 'box', headerName: 'Box contents', filter: true, flex: 3 },
-      { field: 'nextBilling', headerName: 'Next billing', filter: true, flex: 1 },
-      { field: 'lastFulfilled', headerName: 'Last fulfilled', filter: true, flex: 1 },
+      { field: 'id', headerName: 'Subscription id', filter: true, flex: 2, minWidth: 180 },
+      { field: 'status', filter: true, flex: 1, minWidth: 160 },
+      { field: 'amount', headerName: 'Per week (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
+      { field: 'box', headerName: 'Box contents', filter: true, flex: 3, minWidth: 260, wrapText: true, autoHeight: true },
+      { field: 'nextBilling', headerName: 'Next billing', filter: true, flex: 1, minWidth: 130 },
+      { field: 'lastFulfilled', headerName: 'Last fulfilled', filter: true, flex: 1, minWidth: 130 },
       {
-        headerName: 'Actions', flex: 2,
+        headerName: 'Actions', flex: 2, minWidth: 320,
         cellRenderer: (p) => {
           const id = p.data.id;
           const acts = [['refresh', 'Refresh'], ['fulfill', 'Fulfill box']];
@@ -469,11 +469,11 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
 
   const webhookOptions = {
     columnDefs: [
-      { field: 'eventType', headerName: 'Event', filter: true, flex: 2 },
-      { field: 'resourceId', headerName: 'Resource id', filter: true, flex: 2 },
-      { field: 'receivedAt', headerName: 'Received', filter: true, flex: 1 },
-      { field: 'handled', filter: true, flex: 1 },
-      { field: 'summary', filter: true, flex: 3 },
+      { field: 'eventType', headerName: 'Event', filter: true, flex: 2, minWidth: 240 },
+      { field: 'resourceId', headerName: 'Resource id', filter: true, flex: 2, minWidth: 190 },
+      { field: 'receivedAt', headerName: 'Received', filter: true, flex: 1, minWidth: 150 },
+      { field: 'handled', filter: true, flex: 1, minWidth: 90 },
+      { field: 'summary', filter: true, flex: 3, minWidth: 300, wrapText: true, autoHeight: true },
     ],
     defaultColDef: { sortable: true, resizable: true },
     rowData: [],
@@ -482,17 +482,17 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
 
   const groupsOptions = {
     columnDefs: [
-      { field: 'groupName', headerName: 'Group', filter: true, flex: 2 },
-      { field: 'city', filter: true, flex: 1 },
-      { field: 'itemName', headerName: 'Item', filter: true, flex: 2 },
-      { field: 'pooledQty', headerName: 'Pooled qty', filter: 'agNumberColumnFilter', flex: 1 },
-      { field: 'tier', headerName: 'Tier', filter: true, flex: 1 },
-      { field: 'unitPrice', headerName: 'Group price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
-      { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
-      { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
-      { field: 'members', headerName: 'Members', filter: true, flex: 3 },
-      { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1 },
-      { field: 'action', headerName: '', flex: 2, cellRenderer: (p) => p.value || '' },
+      { field: 'groupName', headerName: 'Group', filter: true, flex: 2, minWidth: 140 },
+      { field: 'city', filter: true, flex: 1, minWidth: 80 },
+      { field: 'itemName', headerName: 'Item', filter: true, flex: 2, minWidth: 150 },
+      { field: 'pooledQty', headerName: 'Pooled qty', filter: 'agNumberColumnFilter', flex: 1, minWidth: 90 },
+      { field: 'tier', headerName: 'Tier', filter: true, flex: 1, minWidth: 110 },
+      { field: 'unitPrice', headerName: 'Group price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
+      { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
+      { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
+      { field: 'members', headerName: 'Members', filter: true, flex: 3, minWidth: 150, wrapText: true, autoHeight: true },
+      { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1, minWidth: 90 },
+      { field: 'action', headerName: '', flex: 2, minWidth: 130, cellRenderer: (p) => p.value || '' },
     ],
     defaultColDef: { sortable: true, resizable: true },
     rowData: [],

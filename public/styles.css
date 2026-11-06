@@ -70,7 +70,7 @@ footer { text-align: center; color: #8a94a3; font-size: 12.5px; padding: 18px; }
 .toolbar input, .toolbar select { padding: 10px 12px; border: 1px solid #ccd3dd; border-radius: 8px; font-size: 14px; background: #fff; }
 .toolbar input { flex: 1; }
 .tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #003087; background: #e8eefc; border-radius: 999px; padding: 3px 8px; align-self: flex-start; }
-.dash { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
+.dash { max-width: 1400px; margin: 0 auto; padding: 20px 22px 40px; }
 .dash h2 { margin: 26px 0 4px; }
 .muted { color: #5b6675; font-size: 13.5px; margin: 0 0 12px; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 6px; }

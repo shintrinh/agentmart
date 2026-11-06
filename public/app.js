@@ -134,11 +134,18 @@ $('checkoutBtn').addEventListener('click', async () => {
 });
 
 /* -------------------------------------------------------------------- agent */
+// Render a chat message: escape HTML first, then render **bold** markers
+// (the LLM's replies use markdown emphasis) as <strong> — no literal **.
+function renderRich(text) {
+  const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
 function addMessage(text, who, checkoutUrl) {
   const box = $('agentMessages');
   const div = document.createElement('div');
   div.className = `msg ${who}`;
-  div.textContent = text;
+  div.innerHTML = renderRich(text);
   if (checkoutUrl) {
     const a = document.createElement('a');
     a.href = checkoutUrl; a.target = '_blank'; a.rel = 'noopener';

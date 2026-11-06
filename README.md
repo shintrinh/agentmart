@@ -106,6 +106,11 @@ server uses as its PayPal return URL.
 
 ## For judges — how to test in 2 minutes
 
+> Hosted-demo note: the demo runs on Render's free tier, whose SQLite
+> database resets to the seed state on host restart/redeploy. If the
+> dashboard shows the seed state (0 orders, matcha LOW), just re-run the
+> flow below — it takes about 2 minutes from seed to a captured order.
+
 1. Open the storefront, click the prompt chip **“What am I running out
    of?”** — the agent lists stock with days left and flags the Blue Bottle
    Craft Matcha as LOW (1 jar, ~3 days).

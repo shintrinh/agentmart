@@ -224,20 +224,27 @@ merchant dashboard and the SQLite persistence — was built in that window.
 
 ## What's next
 - Scheduled auto-reminders: v10 reminds on demand from chat and the dashboard; the next step is a schedule that reminds automatically when an invoice goes overdue.
-- A second LLM provider on the same tool layer, to compare answer quality and cost on identical tools.
+- Persistent hosting for the demo database, so the captured-order history survives host restarts (today the free-tier host resets to seed state).
 
 ---
 
-## Demo video script (must stay under 3:00, public on YouTube)
+## Demo video (final cut v4, 2026-11-06 — 2:44.8, under 3:00, public on YouTube)
 
-- **0:00–0:18 — Problem.** "A Blue Bottle café in San Francisco loses sales to stock-outs and hours to manual re-ordering — and the stock-out is usually discovered when a customer complains. Supplier prices creep up a few percent at a time and nobody notices — and a falling price is a buying opportunity nobody catches either. What if restocking happened before the shelf was empty, from the cheaper supplier? Meet AgentMart."
-- **0:18–0:40 — What am I running out of?** Ask the agent → it lists stock with days left; the Craft Matcha is LOW at ~3 days. Product cards show the same stock badges.
-- **0:40–0:58 — Did any prices go up — or down?** Ask the agent → it reports the creepers (Craft Matcha +11%, Blend Beans +9% in 3 months) and the droppers (Craft Instant Coffee −11.4%, Bright Cold Brew −10.8%) — a falling price is a good time to stock up.
-- **0:58–1:28 — The agentic moment.** Click the prompt chip "Smart restock under $60" → agent sizes the restock by burn rate, buys oat milk from Green Valley Farms ($5.99 instead of $6.39, saves $1.20), total $58.47 with an expected delivery date; creates a PayPal order, shows the approval button. Click it → PayPal sandbox login (buyer test account) → approve.
-- **1:28–1:45 — Capture.** Land back on the store with the green "Payment captured" banner. Ask the agent: "What is the status of my order?" → it reports the captured order and total.
-- **1:45–2:02 — Subscribe once, bill weekly.** Ask the agent: "Set up a weekly restock subscription under $60" → it sizes this week's box ($58.47, same matcha + oat-milk), creates the PayPal subscription and shows the approve link. Approve on PayPal sandbox → land back with the green "subscription active" banner; the dashboard subscriptions grid shows ACTIVE with the next billing date 7 days out. One line: "Approve once — the box bills itself every week." Then glance at the webhook events grid: PayPal already pushed `BILLING.SUBSCRIPTION.ACTIVATED` — the status updated itself, no Refresh click.
-- **2:02–2:22 — Buy together, pay less.** Click the prompt chip "What are the group deals?" → the agent reports the Bay Area Specialty Cafés group: matcha pooled to 25 units across 3 cafés → Tier 2, $36.45 instead of $40.50, saves $101.25 vs ordering alone; oat milk pooled to 20 → Tier 1, $5.69 instead of $5.99. Say "place the group order for oat milk" → one PayPal checkout for the pooled 20 units, $113.80 — and after capture each café owes only its own share (our 8 cartons: $45.52). Show the group-buying grid with the pooled quantities, tier prices and savings.
-- **2:22–2:55 — Merchant dashboard + close.** Open the dashboard: inventory grid with the low-stock alert, supplier price grid with creep and drop alerts and best-buy column, spend stats; the order in AG Grid with its expected delivery date; the payables ledger for the suppliers in the order (amount, terms, due date) and the savings stats; the forecast grid (matcha runs out in ~3 days, order-by date already passed — read the live dates off the grid when filming) and the weekly plan ("Weekly restock — Monday", next run the coming Monday); a 10-second waste beat — set oat-milk to 16, simulate one day, $6.39 spoils into the ledger; create and send a draft invoice from the order (NET_30, due date shown), then send a payment reminder from the grid. Closing line: "One agent, one catalog, one PayPal checkout — restock at the speed of a sentence, before you run out, from the cheaper supplier, and always know what you owe — and what not to buy."
+Filmed on the live hosted demo (agentmart.fenbig.com) plus one planning
+segment filmed on a local seed instance of the same app (identical UI and
+numbers, no order id shown). English narration, royalty-free synthesized
+ambient bed, no copyrighted music. All numbers below are the real sandbox
+figures visible in the video.
 
-Recording notes: use sandbox buyer credentials (never a real account), record
+- **0:00–0:17 — Cold open.** PayPal receipt: order 8VK52141NX367420D COMPLETED $58.47, expected delivery 2026-11-10; dashboard stats: 1 order, 1 captured, $58.47 captured revenue, $1.20 saved by cheaper suppliers, 1 stock-out prevented.
+- **0:17–0:36 — What am I running out of?** The agent lists stock with days left; Craft Matcha is LOW at 1 bag, ~3.3 days. Forecast grid says matcha runs out 2026-11-09, "order now". Weekly plan "Weekly restock — Monday" $60, next run 2026-11-09.
+- **0:36–0:56 — Did any prices go up — or down?** The agent reports the creepers (Craft Matcha +11%, Blend Beans +9% in 3 months) and the droppers (Craft Instant Coffee −11.4%, Bright Cold Brew −10.8%) — a falling price is a good time to stock up — and names the cheaper alternate supplier per line.
+- **0:56–1:25 — The agent decides.** The agent reasons about the restock: what is running low, which prices crept, who is cheapest for oat milk. Then the status lookup: "Order 8VK52141NX367420D is COMPLETED — total $58.47: matcha ×1 $40.50 (Kyoto Tea Imports), oat-milk ×3 $5.99 (Green Valley Farms)" — answered by llm:baseten:meta-models/muse-spark-open-1026. Caption: "$58.47 · save $1.20".
+- **1:25–1:43 — Capture.** A real PayPal sandbox approval page, then the webhook grid: CHECKOUT.ORDER.APPROVED → PAYMENT.CAPTURE.COMPLETED (capture 1XT11946MS782974U) → order COMPLETED $58.47. Caption: "PAID · webhook received".
+- **1:43–2:02 — Subscribe once, bill weekly.** Subscription I-XH6YV9BHG1P9 flips from APPROVAL_PENDING to ACTIVE $58.47/week; the webhook grid shows BILLING.SUBSCRIPTION.ACTIVATED pushed by PayPal — the status updated itself, no Refresh click. Next billing date 7 days out. "Approve once — the box bills itself every week."
+- **2:02–2:19 — Buy together, pay less ("one more thing").** The Bay Area Specialty Cafés group: matcha pooled to 25 units across 3 cafés → Tier 2, $36.45 instead of $40.50, saves $101.25 vs ordering alone; oat milk pooled to 20 → Tier 1, $5.69 instead of $5.99. Caption: "25 bags · 3 cafés · −10% · save $101.25". (Philz Coffee and Sightglass Coffee are demo members, not real participants — stated on screen.)
+- **2:19–2:40 — Merchant dashboard + close.** Inventory all OK after the delivery; supplier price grid with creep and drop alerts and best-buy column; the payables ledger for the suppliers in the order ($40.50 Kyoto Tea Imports + $17.97 Green Valley Farms, Net 7, UNPAID); the forecast grid and the weekly plan; the subscriptions grid with the ACTIVE box. Closing line: "One agent, one catalog, one PayPal checkout — restock at the speed of a sentence, before you run out, from the cheaper supplier, and always know what you owe."
+- **2:40–2:45 — End card.** "AgentMart — the café that buys itself." One CTA: "Try the live demo — link in the Devpost description."
+
+Recording notes: sandbox buyer credentials only (never a real account), recorded
 at 1080p, no third-party music/trademarks in the video (hackathon rule).
