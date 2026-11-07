@@ -37,9 +37,12 @@
  *  - Persists carts, orders, invoices and inventory in SQLite
  *    (data/agentmart.db), so they survive a server restart.
  *
- * LLM chain (see .env.example): primary Baseten Muse Spark Open, fallback
- * Fireworks Muse Spark Open, then the deterministic intent engine. Meta
- * muse-spark-1.3 can be swapped in as primary via LLM_BASE_URL/LLM_MODEL.
+ * LLM chain (see .env.example): primary Fireworks Muse Spark Open, fallback
+ * (env-configured, e.g. Baseten), fallback2 (env-configured, intended for
+ * Modal), then the deterministic intent engine. Meta muse-spark-1.3 can be
+ * swapped in as primary via LLM_BASE_URL/LLM_MODEL. The Baseten model
+ * version the chain used to start on was deactivated by the provider on
+ * 2026-11-07, so the code default primary is Fireworks now.
  * Live test 2026-11-05: Baseten and Fireworks both answer and emit tool
  * calls, but both wander in a multi-step loop (Baseten: five rounds, one
  * item added, no checkout; Fireworks: five rounds, two items added,
@@ -47,7 +50,8 @@
  * the system prompt caps searching at two calls before adding items.
  * Config: PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_ENV=sandbox|live,
  * BASE_URL, PORT, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
- * LLM_FALLBACK_API_KEY, LLM_FALLBACK_BASE_URL, LLM_FALLBACK_MODEL.
+ * LLM_FALLBACK_API_KEY, LLM_FALLBACK_BASE_URL, LLM_FALLBACK_MODEL,
+ * LLM_FALLBACK2_API_KEY, LLM_FALLBACK2_BASE_URL, LLM_FALLBACK2_MODEL.
  */
 require('dotenv').config();
 const express = require('express');
@@ -65,18 +69,40 @@ const BASE_URL = (process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || `ht
 
 const paypalConfigured = Boolean(CLIENT_ID && CLIENT_SECRET);
 
-// LLM chain: primary Baseten Muse Spark Open (key expires soon, use first),
-// fallback Fireworks Muse Spark Open, then deterministic engine.
+// LLM chain (v12): primary Fireworks Muse Spark Open, then an env-configured
+// fallback tier, then a second env-configured fallback tier (intended for
+// Modal), then the deterministic engine. The provider name is derived from
+// the base URL so the engine label in replies stays accurate under any
+// override. The old default primary (Baseten) died when the provider
+// deactivated that model version on 2026-11-07.
 // Meta muse-spark-1.3 can be swapped in as primary via LLM_BASE_URL/LLM_MODEL.
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const LLM_BASE_URL = (process.env.LLM_BASE_URL || 'https://inference.baseten.co/v1').replace(/\/$/, '');
-const LLM_MODEL = process.env.LLM_MODEL || 'meta-models/muse-spark-open-1026';
+const LLM_BASE_URL = (process.env.LLM_BASE_URL || 'https://api.fireworks.ai/inference/v1').replace(/\/$/, '');
+const LLM_MODEL = process.env.LLM_MODEL || 'accounts/fireworks/models/muse-spark-open';
 const LLM_FALLBACK_API_KEY = process.env.LLM_FALLBACK_API_KEY || '';
 const LLM_FALLBACK_BASE_URL = (process.env.LLM_FALLBACK_BASE_URL || 'https://api.fireworks.ai/inference/v1').replace(/\/$/, '');
 const LLM_FALLBACK_MODEL = process.env.LLM_FALLBACK_MODEL || 'accounts/fireworks/models/muse-spark-open';
+const LLM_FALLBACK2_API_KEY = process.env.LLM_FALLBACK2_API_KEY || '';
+const LLM_FALLBACK2_BASE_URL = (process.env.LLM_FALLBACK2_BASE_URL || '').replace(/\/$/, '');
+const LLM_FALLBACK2_MODEL = process.env.LLM_FALLBACK2_MODEL || '';
+// Provider name from the base URL (not hardcoded per slot): a slot keeps its
+// label when the URL is overridden, e.g. LLM_BASE_URL pointed at Baseten
+// still reports llm:baseten. Unknown hosts fall back to their hostname.
+function providerNameFor(baseUrl, fallback) {
+  const u = String(baseUrl || '').toLowerCase();
+  if (u.includes('fireworks')) return 'fireworks';
+  if (u.includes('baseten')) return 'baseten';
+  if (u.includes('modal')) return 'modal';
+  if (u.includes('meta')) return 'meta';
+  try { return new URL(baseUrl).hostname.split('.')[0] || fallback; } catch { return fallback; }
+}
 const llmProviders = [
-  ...(LLM_API_KEY ? [{ name: 'baseten', baseUrl: LLM_BASE_URL, model: LLM_MODEL, apiKey: LLM_API_KEY }] : []),
-  ...(LLM_FALLBACK_API_KEY ? [{ name: 'fireworks', baseUrl: LLM_FALLBACK_BASE_URL, model: LLM_FALLBACK_MODEL, apiKey: LLM_FALLBACK_API_KEY }] : []),
+  ...(LLM_API_KEY ? [{ name: providerNameFor(LLM_BASE_URL, 'primary'), baseUrl: LLM_BASE_URL, model: LLM_MODEL, apiKey: LLM_API_KEY }] : []),
+  ...(LLM_FALLBACK_API_KEY ? [{ name: providerNameFor(LLM_FALLBACK_BASE_URL, 'fallback'), baseUrl: LLM_FALLBACK_BASE_URL, model: LLM_FALLBACK_MODEL, apiKey: LLM_FALLBACK_API_KEY }] : []),
+  // Fallback2 has no default URL/model on purpose: it only activates when
+  // the deployer sets all three (key + base URL + model), e.g. a Modal
+  // endpoint. A key alone with no URL would call the wrong host.
+  ...(LLM_FALLBACK2_API_KEY && LLM_FALLBACK2_BASE_URL ? [{ name: providerNameFor(LLM_FALLBACK2_BASE_URL, 'fallback2'), baseUrl: LLM_FALLBACK2_BASE_URL, model: LLM_FALLBACK2_MODEL || 'muse-spark-open', apiKey: LLM_FALLBACK2_API_KEY }] : []),
 ];
 const llmConfigured = llmProviders.length > 0;
 
@@ -343,6 +369,29 @@ function priceTrend(p) {
     history: [...rows.map((r) => ({ date: r.recordedAt, price: r.price })), { date: '2026-11-05', price: current }],
   };
 }
+// v12 price-drop auto-buy: tracked items whose price fell 10% or more in
+// the last 3 months are worth stocking up on while they are cheap. Each
+// deal tops the item up toward maxStock (at most 2 extra units), cheapest
+// first is NOT assumed — catalog order is kept — and the list never exceeds
+// the budget: an item that would break the budget is skipped, not partial.
+// Out-of-stock and already-full items are skipped too.
+function priceDropDeals(budget) {
+  const deals = [];
+  let remaining = Number(budget || 0);
+  for (const p of PRODUCTS) {
+    const t = priceTrend(p);
+    if (!t || !t.drop || t.changePct3mo > -10) continue;
+    if (p.stock <= 0) continue;
+    const headroom = p.maxStock ? p.maxStock - p.stock : 2;
+    if (headroom <= 0) continue;
+    const qty = Math.min(headroom, 2);
+    const cost = Math.round(p.price * qty * 100) / 100;
+    if (cost > remaining) continue;
+    remaining = Math.round((remaining - cost) * 100) / 100;
+    deals.push({ productId: p.id, name: p.name, emoji: p.emoji, price: p.price, qty, cost, changePct3mo: t.changePct3mo, supplier: p.supplier, leadTimeDays: p.leadTimeDays });
+  }
+  return { deals, totalCost: Math.round(deals.reduce((s, d) => s + d.cost, 0) * 100) / 100 };
+}
 // Best supplier: the alternate wins when it is cheaper AND its lead time
 // is no more than 2 days slower than the main supplier.
 function bestSupplier(p) {
@@ -406,6 +455,25 @@ function savingsSummary() {
   const totalSaved = Math.round(done.reduce((s, o) => s + (o.saved || 0), 0) * 100) / 100;
   const preventedStockouts = done.reduce((s, o) => s + (o.preventedStockouts || 0), 0);
   return { capturedOrders: done.length, totalSaved, preventedStockouts };
+}
+// v12 ROI panel: the same ledger, scaled the way a café owner reads it —
+// average saving per captured weekly box, times 52 weeks for the year, plus
+// what one pooled group order saves and how many stock-outs were prevented.
+// All live data, no PayPal calls, no estimates beyond the ×52 scaling.
+function roiSummary() {
+  const s = savingsSummary();
+  const weeklySaving = s.capturedOrders ? Math.round((s.totalSaved / s.capturedOrders) * 100) / 100 : 0;
+  const deals = groupDeals();
+  const groupSavingPerOrder = Math.round(deals.reduce((sum, d) => sum + d.savings, 0) * 100) / 100;
+  return {
+    capturedOrders: s.capturedOrders,
+    totalSaved: s.totalSaved,
+    weeklySaving,
+    yearlySavingPerCafe: Math.round(weeklySaving * 52 * 100) / 100,
+    groupSavingPerOrder,
+    groupDeals: deals.map((d) => ({ itemName: d.itemName, pooledQty: d.pooledQty, tier: d.tier, discountPct: d.discountPct, unitPrice: d.unitPrice, soloPrice: d.soloPrice, savings: d.savings })),
+    stockoutsPrevented: s.preventedStockouts,
+  };
 }
 // Waste: perishables stocked above maxStock spoil a little every simulated
 // day (10% of the excess, at least 1 unit). Demo simulation, labeled so in
@@ -1168,8 +1236,14 @@ function routeWebhookEvent(event) {
     }
     return { kind: 'subscription', id: res.id, status: res.status || byType[type] || null, nextBillingDate: res.billing_info?.next_billing_time || null, summary: `Subscription ${res.id} → ${res.status || byType[type] || type}` };
   }
+  // Invoicing webhook resources nest the invoice under resource.invoice
+  // (resource.id is undefined) — read the nested id.
+  const invId = res.invoice?.id || res.id;
   if (type === 'INVOICING.INVOICE.PAID') {
-    return { kind: 'invoice-paid', invoiceId: res.id, summary: `Invoice ${res.id} paid` };
+    return { kind: 'invoice-paid', invoiceId: invId, summary: `Invoice ${invId} paid` };
+  }
+  if (type === 'INVOICING.INVOICE.CREATED' || type === 'INVOICING.INVOICE.SENT') {
+    return { kind: 'invoice', invoiceId: invId, summary: `Invoice ${invId} ${type === 'INVOICING.INVOICE.SENT' ? 'sent' : 'created'}` };
   }
   if (type === 'CHECKOUT.ORDER.APPROVED') {
     return { kind: 'order-approved', orderId: res.id, summary: `Order ${res.id} approved — auto-capture` };
@@ -1183,6 +1257,11 @@ function routeWebhookEvent(event) {
   if (type.startsWith('PAYMENT.CAPTURE.')) {
     const byType = { 'PAYMENT.CAPTURE.COMPLETED': 'completed', 'PAYMENT.CAPTURE.REFUNDED': 'refunded', 'PAYMENT.CAPTURE.DENIED': 'denied' };
     return { kind: 'capture', captureId: res.id, summary: `Capture ${res.id} ${byType[type] || type}` };
+  }
+  // v12: a billing plan is PayPal-side config for a subscription — there is
+  // nothing local to sync, but the event is expected, not unhandled.
+  if (type === 'BILLING.PLAN.CREATED') {
+    return { kind: 'plan-created', planId: res.id, summary: `Plan ${res.id} created` };
   }
   return { kind: 'unknown', summary: `Unhandled event ${type}` };
 }
@@ -1208,6 +1287,156 @@ async function rehydrateSubscription(id) {
   return rec;
 }
 
+/* ------------------------------------------- v12 boot rehydrate from PayPal */
+// After a Render redeploy wipes the local DB, the subscriptions, orders and
+// invoices on PayPal still exist. On startup, list the recent PayPal webhook
+// events and re-fetch every subscription / order / invoice id they mention,
+// so the dashboard shows the PayPal truth again instead of an empty seed
+// state. Never blocks or crashes startup: every PayPal call is guarded and
+// every failure is logged and counted, never thrown.
+async function listPayPalWebhookEvents() {
+  const token = await paypalAccessToken();
+  const end = new Date();
+  const start = new Date(end.getTime() - 7 * 86400000);
+  // PayPal rejects ISO timestamps with milliseconds on this endpoint
+  // (400 VALIDATION_ERROR on start_time) — strip the .xxx before sending.
+  const ts = (d) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const url = `${PAYPAL_BASE}/v1/notifications/webhooks-events?start_time=${encodeURIComponent(ts(start))}&end_time=${encodeURIComponent(ts(end))}&page_size=20`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`PayPal list webhook events failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  return Array.isArray(data.events) ? data.events : [];
+}
+
+// Map a PayPal checkout order to the local order record. Items are matched
+// back to the catalog by name so supplier / lead time survive the round
+// trip; unknown items keep name, price and quantity only.
+function paypalOrderToLocal(live) {
+  const pu = live.purchase_units?.[0] || {};
+  const items = (pu.items || []).map((it) => {
+    const p = PRODUCTS.find((x) => x.name === it.name);
+    const price = Number(it.unit_amount?.value || 0);
+    const qty = Math.max(1, Math.round(Number(it.quantity || 1)));
+    return p
+      ? { id: p.id, name: p.name, emoji: p.emoji, price, qty, supplier: p.supplier, leadTimeDays: p.leadTimeDays }
+      : { name: it.name, price, qty };
+  });
+  const total = Number(pu.amount?.value || items.reduce((s, i) => s + i.price * i.qty, 0));
+  const statusMap = { APPROVED: 'CREATED', COMPLETED: 'COMPLETED' };
+  return {
+    sessionId: 'rehydrated',
+    items,
+    total: Math.round(total * 100) / 100,
+    status: statusMap[live.status] || live.status || 'CREATED',
+    createdAt: live.create_time || new Date().toISOString(),
+    expectedDelivery: expectedDeliveryDate(items.filter((i) => i.leadTimeDays)),
+    saved: 0,
+    preventedStockouts: 0,
+  };
+}
+
+async function rehydrateOrder(orderId) {
+  const token = await paypalAccessToken();
+  const res = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${orderId}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return null;
+  const live = await res.json();
+  const rec = paypalOrderToLocal(live);
+  orders.set(orderId, rec);
+  saveOrder(orderId, rec);
+  // Money owed is a fact of a completed order: recreate the payables
+  // (INSERT OR IGNORE, so a second sweep is a no-op). Stock is NOT
+  // re-applied — the delivery already happened before the DB wipe, and
+  // re-adding it on top of seed stock would double-count.
+  if (rec.status === 'COMPLETED') createPayablesForOrder(orderId);
+  return rec;
+}
+
+async function rehydrateInvoice(invoiceId) {
+  let inv;
+  try {
+    inv = await getPayPalInvoice(invoiceId);
+  } catch {
+    return null;
+  }
+  const ref = inv.detail?.reference || '';
+  const orderId = (ref.match(/AgentMart order (\S+)/) || [])[1] || '';
+  const recipient = inv.primary_recipients?.[0]?.billing_info?.email_address || '';
+  const total = Number(inv.amount?.value || 0);
+  const createdAt = inv.detail?.invoice_date ? `${inv.detail.invoice_date}T00:00:00.000Z` : new Date().toISOString();
+  const localId = `inv-${inv.id}`;
+  const stored = {
+    orderId,
+    invoiceId: inv.id,
+    status: inv.status || 'DRAFT',
+    recipient,
+    total,
+    createdAt,
+    invoiceUrl: (inv.links || []).find((l) => l.rel === 'self')?.href || '',
+    // PayPal returns no due_date on the invoice resource, so (as in
+    // createPayPalInvoice) the NET_30 due date is created + 30 days.
+    dueDate: addDays(createdAt.slice(0, 10), 30),
+    lastRemindedAt: null,
+  };
+  invoices.set(localId, stored);
+  saveInvoice(localId, stored);
+  return stored;
+}
+
+// Route one webhook event's resource into local state. Pure routing over a
+// given event list: each id is re-fetched from PayPal best-effort, and any
+// failure is recorded in the summary, never thrown.
+async function rehydrateFromEvents(events) {
+  const summary = { subscriptions: 0, orders: 0, invoices: 0, skipped: 0, errors: [] };
+  const seen = new Set();
+  for (const event of events || []) {
+    const action = routeWebhookEvent(event);
+    const id = action.id || action.orderId || action.invoiceId || action.planId || action.subscriptionId || action.captureId || null;
+    if (!id || action.kind === 'unknown' || action.kind === 'plan-created') { summary.skipped += 1; continue; }
+    const key = `${action.kind}:${id}`;
+    if (seen.has(key)) { summary.skipped += 1; continue; }
+    seen.add(key);
+    try {
+      if (action.kind === 'subscription' || action.kind === 'subscription-payment-failed' || action.kind === 'sale') {
+        const subId = action.subscriptionId || action.id;
+        if (subscriptions.has(subId)) await refreshSubscription(subId);
+        else await rehydrateSubscription(subId);
+        summary.subscriptions += 1;
+      } else if (action.kind === 'order-approved' || action.kind === 'order-completed') {
+        if (await rehydrateOrder(action.orderId)) summary.orders += 1;
+      } else if (action.kind === 'invoice-paid' || action.kind === 'invoice') {
+        if (await rehydrateInvoice(action.invoiceId)) summary.invoices += 1;
+      } else if (action.kind === 'capture') {
+        // A capture id is not an order id; the order id rides in
+        // supplementary_data.related_ids.order_id when PayPal sends it.
+        const orderId = event.resource?.supplementary_data?.related_ids?.order_id;
+        if (orderId && await rehydrateOrder(orderId)) summary.orders += 1;
+        else summary.skipped += 1;
+      } else {
+        summary.skipped += 1;
+      }
+    } catch (e) {
+      summary.errors.push(`${action.kind}:${id}: ${e.message}`);
+    }
+  }
+  return summary;
+}
+
+async function bootRehydrateFromPayPal() {
+  if (!paypalConfigured) {
+    console.log('boot rehydrate: PayPal not configured, skipping');
+    return { skipped: true, reason: 'PAYPAL_NOT_CONFIGURED', events: 0, subscriptions: 0, orders: 0, invoices: 0, errors: [] };
+  }
+  try {
+    const events = await listPayPalWebhookEvents();
+    const summary = await rehydrateFromEvents(events);
+    console.log(`boot rehydrate: ${events.length} webhook event(s) listed, rehydrated ${summary.subscriptions} subscription(s), ${summary.orders} order(s), ${summary.invoices} invoice(s)${summary.errors.length ? `, ${summary.errors.length} error(s)` : ''}`);
+    return { skipped: false, events: events.length, ...summary };
+  } catch (e) {
+    console.error('boot rehydrate: PayPal unreachable, continuing with local state:', e.message);
+    return { skipped: false, events: 0, subscriptions: 0, orders: 0, invoices: 0, errors: [e.message] };
+  }
+}
+
 async function handleWebhookEvent(event) {
   const action = routeWebhookEvent(event);
   let handled = false;
@@ -1231,6 +1460,8 @@ async function handleWebhookEvent(event) {
           handled = true;
         }
       }
+    } else if (action.kind === 'invoice') {
+      handled = true; // logged; invoice state is owned by the create/send API flow
     } else if (action.kind === 'order-approved') {
       const rec = orders.get(action.orderId);
       const groupRec = groupOrders.get(action.orderId);
@@ -1274,6 +1505,12 @@ async function handleWebhookEvent(event) {
           } catch { /* leave for the return-URL flow */ }
         }
       }
+      if (!handled && ((rec && rec.status === 'COMPLETED') || (groupRec && groupRec.status === 'COMPLETED'))) {
+        // The buyer already finished this order through the return URL
+        // before the webhook arrived — the state is already synced, so
+        // the event is handled, not unhandled.
+        handled = true;
+      }
     } else if (action.kind === 'order-completed') {
       const rec = orders.get(action.orderId);
       if (rec && rec.status !== 'COMPLETED') {
@@ -1281,11 +1518,16 @@ async function handleWebhookEvent(event) {
         saveOrder(action.orderId, rec);
         applyOrderDelivery(action.orderId, rec);
         handled = true;
+      } else if (rec) {
+        // Already completed (e.g. via the return URL) — nothing left to sync.
+        handled = true;
       }
     } else if (action.kind === 'sale') {
       handled = true; // logged; the subscription/order handlers own the state
     } else if (action.kind === 'capture') {
       handled = true; // logged; the order handlers own the state
+    } else if (action.kind === 'plan-created') {
+      handled = true; // a billing plan is PayPal-side config; nothing local to sync
     }
   } catch (e) {
     console.error('webhook handler failed:', e.message);
@@ -1404,6 +1646,24 @@ const agentTools = {
   },
 };
 
+// v12 price-drop auto-buy, shared by the LLM tool and the deterministic
+// engine: buy the >=10% drops inside the budget, then check out through the
+// same path as a restock. On a checkout failure the items stay in the cart
+// and the summary says so — never a silent partial buy.
+async function buyPriceDrops(session, budget) {
+  const { deals, totalCost } = priceDropDeals(budget);
+  if (!deals.length) return { deals, totalCost: 0, summary: `No tracked item has dropped 10% or more in the last 3 months, so there is nothing to stock up on within $${budget}.` };
+  for (const d of deals) cartAdd(session, d.productId, d.qty, { price: d.price, supplier: d.supplier, leadTimeDays: d.leadTimeDays });
+  try {
+    const r = await agentTools.create_checkout(session);
+    const list = deals.map((d) => `${d.qty} × ${d.name} at ${money(d.price)} (${d.changePct3mo}% in 3 months)`).join(', ');
+    return { deals, totalCost, orderId: r.orderId, checkoutUrl: r.checkoutUrl, summary: `Bought the price drops — ${list} — total ${money(totalCost)} within your $${budget} budget. Order ${r.orderId} is ready for approval: ${r.checkoutUrl}` };
+  } catch (e) {
+    const list = deals.map((d) => `${d.qty} × ${d.name} (${d.changePct3mo}%)`).join(', ');
+    return { deals, totalCost, error: e.message, summary: `Price drops found — ${list} — total ${money(totalCost)} within $${budget}, but checkout failed (${e.message}). The items are in your cart; try again or check out from the storefront.` };
+  }
+}
+
 /* ------------------------------------------------------------ LLM agent (real) */
 const LLM_TOOLS = [
   { type: 'function', function: { name: 'search_products', description: 'Search the café catalog by keyword, optionally under a max price.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxPrice: { type: 'number' } }, required: ['query'] } } },
@@ -1416,6 +1676,7 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'smart_restock', description: 'Build a restock cart from the items that will run out soon, sized by burn rate, and create the PayPal checkout in one step. Use when the user asks to restock before running out.', parameters: { type: 'object', properties: { budget: { type: 'number' } } } } },
   { type: 'function', function: { name: 'check_prices', description: 'Check supplier price history: current price, change over 3 months and 1 month, and which prices crept up more than 5%. Use when the user asks about prices going up.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'check_price_drops', description: 'Check which supplier prices DROPPED more than 5% in 3 months — a buying opportunity: smart restock already buys at the current lower price. Use when the user asks about prices going down or getting cheaper.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'buy_price_drops', description: 'Buy extra stock of items whose price dropped at least 10% in the last 3 months, within a budget (default $60): tops each item up toward max stock, at most 2 extra units, never exceeding the budget, then creates the PayPal checkout. Use when the user asks to buy the price drops, stock up on cheap items, or take advantage of falling prices.', parameters: { type: 'object', properties: { budget: { type: 'number', description: 'Maximum total spend in dollars (default 60).' } }, required: [] } } },
   { type: 'function', function: { name: 'check_payables', description: 'Check what the café owes suppliers: unpaid payables per supplier, amounts, due dates and overdue flags. Use when the user asks what they owe.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'check_overdue_invoices', description: 'Check overdue money: SENT PayPal invoices past their due date (with days overdue) and unpaid supplier payables past their due date. Use when the user asks what is overdue or past due.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'remind_invoice', description: 'Send a PayPal payment reminder for a SENT invoice (by invoice id, or the most overdue SENT invoice when omitted). Only SENT invoices can be reminded. Use when the user asks to remind, nudge or chase a customer about an unpaid invoice.', parameters: { type: 'object', properties: { invoiceId: { type: 'string' } } } } },
@@ -1432,7 +1693,7 @@ const LLM_TOOLS = [
   { type: 'function', function: { name: 'check_group_deals', description: 'Check group-buying deals: for each group and item, the pooled quantity across member cafés, the tier price (5% off at 10+, 10% off at 25+), the solo price, and the saving vs ordering alone. Use when the user asks about group deals or group buying prices.', parameters: { type: 'object', properties: { groupId: { type: 'string' } } } } },
   { type: 'function', function: { name: 'place_group_order', description: 'Place a pooled group order on PayPal at the tier price: one PayPal checkout for the pooled quantity, with each member café owing its own share (payables per café). Use when the user asks to place or order the group buy.', parameters: { type: 'object', properties: { groupId: { type: 'string' }, itemId: { type: 'string' } } } } },
 ];
-const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks about prices going down or getting cheaper, call check_price_drops first and name the items that dropped more than 5% in 3 months — a falling price is a good time to stock up, and smart restock already buys at the current lower price. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks what is overdue or past due, call check_overdue_invoices first and list the overdue SENT invoices (with days overdue) and the overdue payables. When the user asks to remind, nudge or chase a customer about an unpaid invoice, call remind_invoice once (with the invoice id from their message when given, otherwise the most overdue SENT invoice) and confirm the reminder was sent — only SENT invoices can be reminded, so if there is none, say so instead of inventing one. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks about group buying or group deals, call check_group_deals first and report the pooled quantity, the tier price and the saving vs ordering alone for each item. When the user asks to start or create a buying group, call create_buying_group once. When the user asks for a café to join a buying group, call join_buying_group once with the café name and the items and quantities it commits to. When the user asks to place the group order, call place_group_order once and tell them the pooled quantity, the tier price, the PayPal order id and to approve on PayPal sandbox — each member café owes its own share after capture. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
+const LLM_SYSTEM = `You are the AgentMart shopping agent for a small café restocking coffee, tea and gear. You must use the provided tools to act — never invent products, prices or order ids. Products come only from search_products. When the user asks what they are running out of, call check_stock first. When the user asks to restock before running out, call smart_restock once (it sizes the cart and creates the checkout) instead of searching and adding item by item. When the user asks for a kit/bundle under a budget: search at most twice, then immediately add items one by one staying inside the budget, then call create_checkout exactly once and tell the user the order id, total and to approve on PayPal sandbox. Do not keep searching once you have seen products that fit the budget. When the user asks for an order status, call order_status with the id from their message. When the user asks about prices going up or supplier prices, call check_prices first and name the items that crept up more than 5% in 3 months. When the user asks about prices going down or getting cheaper, call check_price_drops first and name the items that dropped more than 5% in 3 months — a falling price is a good time to stock up, and smart restock already buys at the current lower price. When the user asks to buy the price drops or stock up on cheap items, call buy_price_drops once with their budget (default $60) and tell them the items, the total and the PayPal order id to approve. When the user asks what they owe suppliers, call check_payables first and list the unpaid amounts, due dates and anything overdue. When the user asks what is overdue or past due, call check_overdue_invoices first and list the overdue SENT invoices (with days overdue) and the overdue payables. When the user asks to remind, nudge or chase a customer about an unpaid invoice, call remind_invoice once (with the invoice id from their message when given, otherwise the most overdue SENT invoice) and confirm the reminder was sent — only SENT invoices can be reminded, so if there is none, say so instead of inventing one. When the user asks how much you have saved them, call check_savings first and report the total saved, the stock-outs prevented and the number of captured orders — never say savings are not tracked when the tool returns a number, even if it is zero. When the user asks to run their weekly restock, call run_restock_plan once. When the user asks to set up a weekly restock subscription, call create_subscription once and tell them the box contents, the weekly amount and to approve on PayPal sandbox — the subscription bills weekly after approval. When the user asks what subscriptions they have, call check_subscriptions first. When the user asks to cancel a subscription, call cancel_subscription once. When the user asks to fulfill this week's subscription box, call fulfill_subscription once. When the user asks about recent payments or webhook events, call check_recent_events first and report what PayPal pushed to the server. When the user asks to revise or change their subscription or weekly box price, call revise_subscription once and tell them the old and new amounts — and if the price went up, that they must approve the change on PayPal via the returned link. When the user asks about group buying or group deals, call check_group_deals first and report the pooled quantity, the tier price and the saving vs ordering alone for each item. When the user asks to start or create a buying group, call create_buying_group once. When the user asks for a café to join a buying group, call join_buying_group once with the café name and the items and quantities it commits to. When the user asks to place the group order, call place_group_order once and tell them the pooled quantity, the tier price, the PayPal order id and to approve on PayPal sandbox — each member café owes its own share after capture. When the user asks when things will run out, call check_stock first and answer with the forecast dates (stock-out date and order-by date). If a product the user wants is out of stock, the add_to_cart tool automatically substitutes the closest same-category in-stock item and tells you in its result — explain the swap and the price difference to the user, and offer to remove it with remove_from_cart. Answer in English, concisely, with prices in USD.`;
 
 async function executeLlmTool(session, name, args) {
   if (name === 'search_products') {
@@ -1497,6 +1758,11 @@ async function executeLlmTool(session, name, args) {
   }
   if (name === 'check_price_drops') {
     return { drops: PRODUCTS.map((p) => priceTrend(p)).filter((t) => t.drop).sort((a, b) => a.changePct3mo - b.changePct3mo) };
+  }
+  if (name === 'buy_price_drops') {
+    const budget = typeof args.budget === 'number' && args.budget > 0 ? args.budget : 60;
+    const r = await buyPriceDrops(session, budget);
+    return { budget, deals: r.deals, totalCost: r.totalCost, orderId: r.orderId, checkoutUrl: r.checkoutUrl, reply: r.summary };
   }
   if (name === 'check_payables') {
     const today = new Date().toISOString().slice(0, 10);
@@ -1612,9 +1878,9 @@ async function runLlmAgent(session, rawMessage, provider) {
 
 async function runAgent(session, rawMessage) {
   const message = (rawMessage || '').trim();
-  // Real LLM first when configured: Baseten, then Fireworks fallback.
-  // Fall back to the deterministic engine on any LLM error so the demo
-  // never dies in front of a judge.
+  // Real LLM first when configured: providers in order (Fireworks primary,
+  // then fallback, then fallback2). Fall back to the deterministic engine
+  // on any LLM error so the demo never dies in front of a judge.
   for (const provider of llmProviders) {
     try {
       return await runLlmAgent(session, message, provider);
@@ -1877,6 +2143,16 @@ async function runAgent(session, rawMessage) {
       return { reply: `${out.cafeName} joined "${buyingGroups.get(id).name}"${items.length ? `, committing to ${items.map((i) => `${i.qty}× ${productById(i.itemId).name}`).join(', ')}` : ''}. ${dealsReply()}` };
     }
     return { reply: dealsReply() };
+  }
+
+  // Price-drop auto-buy (v12): "buy the price drops" / "stock up on the
+  // cheap stuff" — must run BEFORE the price-drops question branch below,
+  // which also matches "price drop" but only reports.
+  if (/(buy|stock up|take advantage|grab).*(price drop|price fall|falling price|dropped price|cheap)|((price drop|price fall|falling price|dropped price).*(buy|stock up|grab))/.test(msg)) {
+    const budgetMatch = msg.match(/(?:under|below|within|\$)\s*\$?(\d+(?:\.\d+)?)/);
+    const budget = budgetMatch ? Number(budgetMatch[1]) : 60;
+    const r = await buyPriceDrops(session, budget);
+    return { reply: r.summary, engine: 'deterministic', actions: r.orderId ? [{ type: 'order', id: r.orderId, url: r.checkoutUrl }] : [], meta: { priceDropDeals: r.deals } };
   }
 
   // Price drops (v10): "did any prices go down?" — must run BEFORE the
@@ -2188,6 +2464,7 @@ app.post('/api/inventory/simulate-day', (req, res) => {
   res.json({ inventory: inventoryView(), spoiled });
 });
 app.get('/api/waste', (req, res) => res.json(wasteSummary()));
+app.get('/api/roi', (req, res) => res.json(roiSummary()));
 app.post('/api/inventory/:id/adjust', (req, res) => {
   // Stocktake: correct the recorded stock to what was actually counted.
   const p = productById(req.params.id);
@@ -2420,6 +2697,10 @@ if (require.main === module) {
     console.log(`AgentMart running at ${BASE_URL} (PayPal env: ${PAYPAL_ENV}, configured: ${paypalConfigured}, LLM: ${llmConfigured ? LLM_MODEL : 'deterministic fallback'})`);
     // v8: self-register the PayPal webhook so async events arrive.
     registerPayPalWebhook().catch((e) => console.error('webhook: registration failed:', e.message));
+    // v12: rehydrate subscriptions/orders/invoices PayPal still knows
+    // about after a DB wipe. Fire-and-forget: it never throws, and the
+    // server is already accepting connections when it runs.
+    bootRehydrateFromPayPal().catch((e) => console.error('boot rehydrate failed:', e.message));
   });
 }
-module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, reviseSubscription, invoices, overdueInvoices, remindPayPalInvoice, CAFE, groupTier, groupDeals, createBuyingGroup, joinBuyingGroup, createGroupPayPalOrder, completeGroupOrder, OUR_CAFE, buyingGroups, groupMembers, groupIntents, groupOrders, payables };
+module.exports = { app, searchProducts, cartView, runAgent, llmConfigured, paypalConfigured, inventoryView, smartRestockPlan, findSubstitute, addToCartWithSubstitute, bestSupplier, priceTrend, priceDropDeals, buyPriceDrops, expectedDeliveryDate, cartAdd, payablesForOrder, supplierTerms, forecastView, nextRunDate, createPlan, wasteSummary, spoilExcess, savingsSummary, roiSummary, llmTools: LLM_TOOLS, subscriptionView, createSubscription, refreshSubscription, routeWebhookEvent, recentWebhookEvents, handleWebhookEvent, reviseSubscription, invoices, overdueInvoices, remindPayPalInvoice, CAFE, groupTier, groupDeals, createBuyingGroup, joinBuyingGroup, createGroupPayPalOrder, completeGroupOrder, OUR_CAFE, buyingGroups, groupMembers, groupIntents, groupOrders, payables, orders, subscriptions, providerNameFor, bootRehydrateFromPayPal, rehydrateFromEvents, rehydrateOrder, rehydrateInvoice };

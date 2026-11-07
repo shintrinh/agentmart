@@ -10,7 +10,7 @@ const path = require('node:path');
 // Tests use a throwaway SQLite file so they never mutate the demo database.
 const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agentmart-test-')), 'test.db');
 process.env.AGENTMART_DB_PATH = tmpDb;
-const { app, searchProducts } = require('./server');
+const { app, searchProducts, roiSummary, groupDeals, orders, subscriptions, payables, invoices, inventoryView, providerNameFor, routeWebhookEvent, handleWebhookEvent, recentWebhookEvents, bootRehydrateFromPayPal, rehydrateFromEvents, rehydrateInvoice, runAgent, priceDropDeals, llmTools } = require('./server');
 
 let server;
 let base;
@@ -563,7 +563,7 @@ test('agent reports no webhook events when none arrived', async () => {
 test('v9 revise_subscription tool is registered for the LLM', () => {
   const { llmTools } = require('./server');
   assert.ok(llmTools.find((t) => t.function.name === 'revise_subscription'));
-  assert.equal(llmTools.length, 25);
+  assert.equal(llmTools.length, 26);
 });
 
 test('v10 price-drop, overdue and remind tools are registered for the LLM', () => {
@@ -710,7 +710,7 @@ test('v11 group-buying tools are registered for the LLM', () => {
   for (const name of ['create_buying_group', 'join_buying_group', 'check_group_deals', 'place_group_order']) {
     assert.ok(llmTools.find((t) => t.function.name === name), `${name} missing`);
   }
-  assert.equal(llmTools.length, 25);
+  assert.equal(llmTools.length, 26);
 });
 
 test('v11 agent group-deals intent reports pooled qty, tier and savings', async () => {
@@ -782,4 +782,264 @@ test("agent routes 'Restock before I run out' to smart restock, not the kit buil
   const reset = await api('/api/demo/reset', { method: 'POST', body: JSON.stringify({}) });
   assert.equal(reset.status, 200);
   assert.equal(reset.data.inventory.find((r) => r.id === 'matcha').stock, 1);
+});
+
+// ---------- v12: deep customization ----------
+// These tests stub global fetch where PayPal is involved, so they never hit
+// the sandbox. The stub is always restored in a finally block.
+
+test('v12 ROI summary scales weekly saving to a year and sums group deals', () => {
+  const before = roiSummary();
+  // Group saving is live from the group intents (matcha + oat-milk tiers).
+  const deals = groupDeals();
+  assert.equal(before.groupSavingPerOrder, Math.round(deals.reduce((s, d) => s + d.savings, 0) * 100) / 100);
+  assert.ok(before.groupSavingPerOrder > 0);
+  orders.set('TEST-ROI-1', { sessionId: 'test', items: [], total: 58.47, status: 'COMPLETED', createdAt: new Date().toISOString(), expectedDelivery: null, saved: 1.20, preventedStockouts: 1 });
+  try {
+    const after = roiSummary();
+    assert.equal(after.capturedOrders, before.capturedOrders + 1);
+    assert.equal(after.totalSaved, Math.round((before.totalSaved + 1.20) * 100) / 100);
+    assert.equal(after.stockoutsPrevented, before.stockoutsPrevented + 1);
+    assert.equal(after.weeklySaving, Math.round((after.totalSaved / after.capturedOrders) * 100) / 100);
+    assert.equal(after.yearlySavingPerCafe, Math.round(after.weeklySaving * 52 * 100) / 100);
+  } finally {
+    orders.delete('TEST-ROI-1');
+  }
+});
+
+test('v12 GET /api/roi returns the ROI summary over HTTP', async () => {
+  const r = await api('/api/roi');
+  assert.equal(r.status, 200);
+  assert.equal(typeof r.data.weeklySaving, 'number');
+  assert.equal(typeof r.data.yearlySavingPerCafe, 'number');
+  assert.equal(typeof r.data.groupSavingPerOrder, 'number');
+  assert.equal(typeof r.data.stockoutsPrevented, 'number');
+});
+
+test('v12 BILLING.PLAN.CREATED is handled with a clear summary', async () => {
+  const action = routeWebhookEvent({ id: 'WH-TEST-PLAN-1', event_type: 'BILLING.PLAN.CREATED', resource: { id: 'P-TEST-1' } });
+  assert.equal(action.kind, 'plan-created');
+  assert.equal(action.summary, 'Plan P-TEST-1 created');
+  await handleWebhookEvent({ id: 'WH-TEST-PLAN-1', event_type: 'BILLING.PLAN.CREATED', resource: { id: 'P-TEST-1' } });
+  const evt = recentWebhookEvents().find((e) => e.summary === 'Plan P-TEST-1 created');
+  assert.ok(evt, 'plan-created event recorded');
+  assert.equal(evt.handled, 1); // SQLite stores handled as 1/0
+});
+
+test('loop1 order-approved on an already-completed order is handled without calling PayPal', async () => {
+  // v5 chain evidence showed CHECKOUT.ORDER.APPROVED handled=0: the buyer
+  // finished through the return URL first, so the webhook found the order
+  // already COMPLETED and did nothing — the grid wrongly called it unhandled.
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('no PayPal call expected'); };
+  try {
+    orders.set('ORDER-TEST-IDEM-1', { id: 'ORDER-TEST-IDEM-1', sessionId: 'test', items: [{ id: 'matcha', name: 'Blue Bottle Craft Matcha · 100 g', price: 40.50, qty: 1 }], total: 40.50, status: 'COMPLETED', createdAt: '2026-11-07T07:00:00Z', expectedDelivery: '2026-11-11' });
+    const result = await handleWebhookEvent({ id: 'WH-TEST-IDEM-1', event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: 'ORDER-TEST-IDEM-1' } });
+    assert.equal(result.handled, true);
+    assert.equal(orders.get('ORDER-TEST-IDEM-1').status, 'COMPLETED');
+    const evt = recentWebhookEvents().find((e) => e.summary === 'Order ORDER-TEST-IDEM-1 approved — auto-capture');
+    assert.ok(evt, 'event recorded');
+    assert.equal(evt.handled, 1);
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-IDEM-1');
+  }
+});
+
+test('loop1 order-completed on an already-completed order is handled without re-applying delivery', async () => {
+  // applyOrderDelivery adds stock + payables: running it twice would
+  // double-count. The return-URL flow already applied it, so the webhook
+  // must only flip the handled flag.
+  orders.set('ORDER-TEST-IDEM-2', { id: 'ORDER-TEST-IDEM-2', sessionId: 'test', items: [{ id: 'matcha', name: 'Blue Bottle Craft Matcha · 100 g', price: 40.50, qty: 1 }], total: 40.50, status: 'COMPLETED', createdAt: '2026-11-07T07:00:00Z', expectedDelivery: '2026-11-11' });
+  try {
+    const stockBefore = inventoryView().find((r) => r.id === 'matcha').stock;
+    const result = await handleWebhookEvent({ id: 'WH-TEST-IDEM-2', event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-IDEM-2' } });
+    assert.equal(result.handled, true);
+    assert.equal(orders.get('ORDER-TEST-IDEM-2').status, 'COMPLETED');
+    assert.equal(inventoryView().find((r) => r.id === 'matcha').stock, stockBefore, 'stock must not be added twice');
+    assert.equal(payables.has('pay-ORDER-TEST-IDEM-2-kyoto-tea-imports'), false, 'no duplicate payable');
+    const evt = recentWebhookEvents().find((e) => e.summary === 'Order ORDER-TEST-IDEM-2 completed');
+    assert.ok(evt, 'event recorded');
+    assert.equal(evt.handled, 1);
+  } finally {
+    orders.delete('ORDER-TEST-IDEM-2');
+  }
+});
+
+test('loop1 INVOICING.INVOICE.CREATED/SENT are handled (logged, not unhandled)', async () => {
+  // v12 routed these events but the live handler had no branch for them,
+  // so the webhook grid would show them as unhandled when they arrive.
+  for (const [type, word] of [['INVOICING.INVOICE.CREATED', 'created'], ['INVOICING.INVOICE.SENT', 'sent']]) {
+    const result = await handleWebhookEvent({ id: `WH-TEST-INV-${word}`, event_type: type, resource: { invoice: { id: 'INV2-TEST-1' } } });
+    assert.equal(result.handled, true);
+    const evt = recentWebhookEvents().find((e) => e.summary === `Invoice INV2-TEST-1 ${word}`);
+    assert.ok(evt, `${type} event recorded`);
+    assert.equal(evt.handled, 1);
+  }
+});
+
+test('v12 providerNameFor derives the engine label from the base URL', () => {
+  assert.equal(providerNameFor('https://api.fireworks.ai/inference/v1', 'x'), 'fireworks');
+  assert.equal(providerNameFor('https://inference.baseten.co/v1', 'x'), 'baseten');
+  assert.equal(providerNameFor('https://api.modal.com/v1', 'x'), 'modal');
+  assert.equal(providerNameFor('https://api.example.com/v1', 'x'), 'api');
+});
+
+test('v12 boot rehydrate tolerates PayPal being unreachable', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('network down'); };
+  try {
+    const result = await bootRehydrateFromPayPal();
+    assert.equal(result.subscriptions, 0);
+    assert.equal(result.orders, 0);
+    assert.equal(result.invoices, 0);
+    assert.ok(result.errors.length >= 1, 'failure is recorded, not thrown');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('v12 boot rehydrate re-creates a lost subscription from PayPal events', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v1/billing/subscriptions/I-TEST-REHYDRATE')) return { ok: true, json: async () => ({ id: 'I-TEST-REHYDRATE', status: 'ACTIVE', plan_id: 'P-TEST-PLAN', billing_info: { next_billing_time: '2026-11-14T10:00:00Z' } }) };
+    if (u.includes('/v1/billing/plans/P-TEST-PLAN')) return { ok: true, json: async () => ({ billing_cycles: [{ pricing_scheme: { fixed_price: { value: '58.47' } } }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'BILLING.SUBSCRIPTION.ACTIVATED', resource: { id: 'I-TEST-REHYDRATE' } },
+    ]);
+    assert.equal(summary.subscriptions, 1);
+    assert.equal(summary.errors.length, 0);
+    const sub = subscriptions.get('I-TEST-REHYDRATE');
+    assert.ok(sub);
+    assert.equal(sub.status, 'ACTIVE');
+    assert.equal(sub.amount, 58.47);
+  } finally {
+    globalThis.fetch = origFetch;
+    subscriptions.delete('I-TEST-REHYDRATE');
+  }
+});
+
+test('v12 boot rehydrate re-creates a completed order and its payables', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders/ORDER-TEST-1')) return { ok: true, json: async () => ({ id: 'ORDER-TEST-1', status: 'COMPLETED', create_time: '2026-11-07T07:00:00Z', purchase_units: [{ amount: { value: '40.50' }, items: [{ name: 'Blue Bottle Craft Matcha · 100 g', unit_amount: { value: '40.50' }, quantity: '1' }] }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-1' } },
+    ]);
+    assert.equal(summary.orders, 1);
+    const rec = orders.get('ORDER-TEST-1');
+    assert.ok(rec);
+    assert.equal(rec.status, 'COMPLETED');
+    assert.equal(rec.items[0].supplier, 'Kyoto Tea Imports');
+    assert.ok(payables.has('pay-ORDER-TEST-1-kyoto-tea-imports'));
+    assert.equal(payables.get('pay-ORDER-TEST-1-kyoto-tea-imports').amount, 40.50);
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-1');
+    payables.delete('pay-ORDER-TEST-1-kyoto-tea-imports');
+  }
+});
+
+test('v12 boot rehydrate re-creates an invoice from a PayPal event', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/invoicing/invoices/INV2-TEST')) return { ok: true, json: async () => ({ id: 'INV2-TEST', status: 'SENT', detail: { reference: 'AgentMart order ORDER-TEST-1', invoice_date: '2026-11-07' }, primary_recipients: [{ billing_info: { email_address: 'buyer@example.com' } }], amount: { value: '58.47' }, links: [{ rel: 'self', href: 'https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-TEST' }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'INVOICING.INVOICE.PAID', resource: { id: 'INV2-TEST' } },
+    ]);
+    assert.equal(summary.invoices, 1);
+    const rec = invoices.get('inv-INV2-TEST');
+    assert.ok(rec);
+    assert.equal(rec.status, 'SENT');
+    assert.equal(rec.total, 58.47);
+    assert.equal(rec.orderId, 'ORDER-TEST-1');
+    assert.equal(rec.dueDate, '2026-12-07');
+    assert.equal(rec.recipient, 'buyer@example.com');
+  } finally {
+    globalThis.fetch = origFetch;
+    invoices.delete('inv-INV2-TEST');
+  }
+});
+
+test('v12 rehydrateInvoice returns null when PayPal has no such invoice', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    assert.equal(await rehydrateInvoice('INV2-NOPE'), null);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('v12 priceDropDeals lists the >=10% drops sized inside the budget', () => {
+  const { deals, totalCost } = priceDropDeals(60);
+  assert.deepEqual(deals.map((d) => d.productId), ['coldbrew-bottle', 'instant-coffee']);
+  assert.deepEqual(deals.map((d) => d.qty), [2, 2]);
+  assert.equal(totalCost, 18.58);
+  assert.ok(deals.every((d) => d.changePct3mo <= -10));
+  // A tight budget skips the item that would break it instead of buying
+  // a partial quantity: coldbrew (2 x $5.79 = $11.58) does not fit $10.
+  const tight = priceDropDeals(10);
+  assert.deepEqual(tight.deals.map((d) => d.productId), ['instant-coffee']);
+  assert.equal(tight.totalCost, 7.00);
+  assert.deepEqual(priceDropDeals(5).deals, []);
+});
+
+test('v12 buy_price_drops is registered for the LLM', () => {
+  assert.ok(llmTools.find((t) => t.function.name === 'buy_price_drops'), 'buy_price_drops missing');
+  assert.equal(llmTools.length, 26);
+});
+
+test('v12 price-drop auto-buy buys the drops within budget and reports them', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders')) return { ok: true, json: async () => ({ id: 'ORDER-PRICE-DROP-1', status: 'CREATED', links: [{ rel: 'approve', href: 'https://www.sandbox.paypal.com/checkoutnow?token=ORDER-PRICE-DROP-1' }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const res = await runAgent('test-price-drop', 'buy the price drops');
+    assert.equal(res.engine, 'deterministic');
+    assert.match(res.reply, /Cold Brew/i);
+    assert.match(res.reply, /Instant Coffee/i);
+    assert.match(res.reply, /ORDER-PRICE-DROP-1/);
+    assert.ok((res.actions || []).some((a) => a.id === 'ORDER-PRICE-DROP-1'));
+    const order = orders.get('ORDER-PRICE-DROP-1');
+    assert.ok(order);
+    assert.equal(order.total, 18.58);
+    assert.ok(order.total <= 60, `total ${order.total} within $60 budget`);
+    assert.deepEqual(order.items.map((i) => i.id).sort(), ['coldbrew-bottle', 'instant-coffee']);
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-PRICE-DROP-1');
+  }
+});
+
+test('v12 asking about price drops still only reports, it does not buy', async () => {
+  const res = await runAgent('test-price-drop-q', 'did any prices go down?');
+  // (The v10 question branch returns no engine field — pre-existing — so
+  // this test asserts on the reply and the absence of a buy action only.)
+  assert.match(res.reply, /Cold Brew/i);
+  assert.equal((res.actions || []).length, 0);
+  assert.equal(orders.has('ORDER-PRICE-DROP-1'), false);
 });

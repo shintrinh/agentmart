@@ -28,13 +28,19 @@
   <div id="lowStockAlert"></div>
 
   <section>
+    <h2>Return on investment — what the agent saves you</h2>
+    <p class="muted">Live from the savings ledger, group tiers and forecast — no estimates: average saving per captured weekly box, scaled to a year; saving on every pooled group order; stock-outs already prevented.</p>
+    <div id="roiPanel" class="stats"></div>
+  </section>
+
+  <section>
     <h2>Inventory</h2>
     <p class="muted">Stock on hand for the Blue Bottle Coffee café, with daily usage and days left at current burn rate. Capturing a restock order adds the delivery to stock. “Simulate one day” is a demo helper that advances one day of usage.</p>
     <form id="simDayForm" class="invoice-form">
       <button type="submit">Simulate one day of sales</button>
     </form>
     <p id="simDayMsg" class="checkout-msg"></p>
-    <div id="inventoryGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+    <div id="inventoryGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 300px; width: 100%;"></div>
     <div id="overstockAlert"></div>
     <form id="adjustForm" class="invoice-form">
       <select id="adjustProduct" aria-label="Product">
@@ -59,14 +65,14 @@
     <h2>Waste — what spoiled</h2>
     <p class="muted">Perishables stocked above their max spoil a little every simulated day (10% of the excess). This is a demo simulation of the carrying cost of overbuying.</p>
     <div id="wasteStats" class="stats"></div>
-    <div id="wasteGrid" class="ag-theme-quartz" style="height: 200px; width: 100%;"></div>
+    <div id="wasteGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 200px; width: 100%;"></div>
   </section>
 
   <section>
     <h2>Supplier prices</h2>
     <p class="muted">Current prices are Blue Bottle's published retail prices (verified 2026-11-05 — see README); the Aug–Oct 2026 history is illustrative demo data. “Best buy” is the supplier smart restock actually orders from: the alternate wins when it is cheaper and no more than 2 days slower. Creep = up more than 5% in 3 months; drop = down more than 5% — a falling price is a good time to stock up.</p>
     <div id="priceAlert"></div>
-    <div id="pricesGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+    <div id="pricesGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 300px; width: 100%;"></div>
   </section>
 
   <section>
@@ -78,13 +84,13 @@
       <button type="submit">Mark as paid</button>
     </form>
     <p id="payPayableMsg" class="checkout-msg"></p>
-    <div id="payablesGrid" class="ag-theme-quartz" style="height: 260px; width: 100%;"></div>
+    <div id="payablesGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 260px; width: 100%;"></div>
   </section>
 
   <section>
     <h2>Forecast — when things run out</h2>
     <p class="muted">Projected from current stock and daily usage (demo forecast, not machine learning). “Order by” is the stock-out date minus the supplier lead time — if it has passed, order now.</p>
-    <div id="forecastGrid" class="ag-theme-quartz" style="height: 300px; width: 100%;"></div>
+    <div id="forecastGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 300px; width: 100%;"></div>
   </section>
 
   <section>
@@ -116,7 +122,7 @@
       <button type="submit">Set up weekly subscription</button>
     </form>
     <p id="subMsg" class="checkout-msg"></p>
-    <div id="subsGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+    <div id="subsGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 220px; width: 100%;"></div>
   </section>
 
   <section>
@@ -134,19 +140,19 @@
       <input id="joinCafeName" type="text" placeholder="Café name, e.g. Philz Coffee — Mission" required />
       <button type="submit">Join group</button>
     </form>
-    <div id="groupsGrid" class="ag-theme-quartz" style="height: 260px; width: 100%;"></div>
+    <div id="groupsGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 260px; width: 100%;"></div>
   </section>
 
   <section>
     <h2>Webhook events — what PayPal pushed</h2>
     <p class="muted">PayPal sends async events here (subscription activated/cancelled, invoice paid, order approved, sale completed). Each event is signature-verified before it is trusted; handled events updated the dashboard on their own — no Refresh click needed.</p>
-    <div id="webhookGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+    <div id="webhookGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 220px; width: 100%;"></div>
   </section>
 
   <section>
     <h2>Orders</h2>
     <p class="muted">AG Grid — sort, filter and resize any column. Every row is a real PayPal sandbox order created by the agent or the manual checkout.</p>
-    <div id="ordersGrid" class="ag-theme-quartz" style="height: 320px; width: 100%;"></div>
+    <div id="ordersGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 320px; width: 100%;"></div>
   </section>
 
   <section>
@@ -168,7 +174,7 @@
       <button type="submit">Refresh invoice statuses from PayPal</button>
     </form>
     <p id="refreshInvoicesMsg" class="checkout-msg"></p>
-    <div id="invoicesGrid" class="ag-theme-quartz" style="height: 220px; width: 100%;"></div>
+    <div id="invoicesGrid" class="ag-theme-quartz ag-theme-agentmart" style="height: 220px; width: 100%;"></div>
   </section>
 </main>
 

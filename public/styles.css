@@ -80,3 +80,61 @@ footer { text-align: center; color: #8a94a3; font-size: 12.5px; padding: 18px; }
 .invoice-form { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .invoice-form input { padding: 10px 12px; border: 1px solid #ccd3dd; border-radius: 8px; font-size: 14px; flex: 1; min-width: 220px; }
 .invoice-form button { background: #0070e0; color: #fff; border: 0; border-radius: 8px; padding: 10px 14px; font-weight: 600; cursor: pointer; }
+
+/* ---------------- v12: custom AgentMart AG Grid theme ---------------- */
+/* Same vendored Quartz base, restyled to the AgentMart palette (warm cream
+   header, dark-green accents) and tighter rows, so the dashboard reads as
+   one product instead of a stock grid. All 10 grids carry the class
+   ag-theme-agentmart on top of ag-theme-quartz. */
+.ag-theme-agentmart {
+  --ag-background-color: #fffdf8;
+  --ag-header-background-color: #f4efe4;
+  --ag-header-foreground-color: #1a4d2e;
+  --ag-header-font-size: 13px;
+  --ag-header-font-weight: 700;
+  --ag-odd-row-background-color: #faf7f0;
+  --ag-row-hover-color: #eef4ea;
+  --ag-selected-row-background-color: #e2efdb;
+  --ag-border-color: #e5ddcb;
+  --ag-font-size: 13px;
+  --ag-row-height: 38px;
+  --ag-header-height: 40px;
+  --ag-range-selection-border-color: #1a4d2e;
+  --ag-checkbox-checked-color: #1a4d2e;
+  --ag-input-focus-border-color: #1a4d2e;
+}
+.ag-theme-agentmart .ag-header-cell { letter-spacing: 0.01em; }
+.ag-theme-agentmart .ag-row { border-bottom: 1px solid #efe9db; }
+
+/* Status pills used by the status / handled / order / overdue / follow-up /
+   order-now columns (dashboard.js statusPill / flagCell renderers). */
+.pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.pill-ok { background: #e2f2e2; color: #1a6b2f; }
+.pill-warn { background: #fff3cf; color: #8a5a00; }
+.pill-bad { background: #fde3e3; color: #a11d1d; }
+.pill-info { background: #e0ecf7; color: #1d4e89; }
+.pill-muted { background: #f0f0f0; color: #555; }
+
+/* Loading skeleton: shimmering placeholder rows shown by the grids while
+   their first fetch is in flight (overlayLoadingTemplate). */
+.ag-skeleton { width: 80%; }
+.ag-skeleton .sk-row {
+  height: 14px;
+  margin: 9px auto;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #ece7db 25%, #f6f2e9 50%, #ece7db 75%);
+  background-size: 200% 100%;
+  animation: sk-shimmer 1.2s infinite linear;
+}
+@keyframes sk-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

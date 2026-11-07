@@ -6,6 +6,35 @@ async function api(url, opts = {}) {
   return { ok: res.ok, status: res.status, data };
 }
 
+// v12 custom theme helpers: status pills + loading skeletons so grids show
+// a shimmer while data loads instead of flashing "No Rows To Show".
+const LOADING_TEMPLATE = '<div class="ag-overlay-loading-center"><div class="ag-skeleton"><div class="sk-row" style="width:92%"></div><div class="sk-row" style="width:78%"></div><div class="sk-row" style="width:85%"></div><div class="sk-row" style="width:64%"></div></div></div>';
+function statusPill(value) {
+  const v = String(value ?? '').trim();
+  const map = {
+    COMPLETED: 'pill-ok', ACTIVE: 'pill-ok', PAID: 'pill-ok', OK: 'pill-ok', handled: 'pill-ok',
+    CREATED: 'pill-warn', APPROVAL_PENDING: 'pill-warn', SENT: 'pill-warn', LOW: 'pill-warn', UNPAID: 'pill-warn',
+    CANCELLED: 'pill-bad', EXPIRED: 'pill-bad', FAILED: 'pill-bad', OUT: 'pill-bad', denied: 'pill-bad',
+    SUSPENDED: 'pill-info', OPEN: 'pill-info',
+  };
+  return `<span class="pill ${map[v] || 'pill-muted'}">${v || '—'}</span>`;
+}
+function pillCell(p) { return statusPill(p.value); }
+// "Yes — ..." flags (overdue / follow-up / order-now): red for overdue,
+// amber for any other yes.
+function flagCell(p) {
+  const v = String(p.value ?? '').trim();
+  if (!v || v === '—') return '—';
+  if (/overdue/i.test(v)) return `<span class="pill pill-bad">${v}</span>`;
+  if (/^yes/i.test(v)) return `<span class="pill pill-warn">${v}</span>`;
+  return `<span class="pill pill-muted">${v}</span>`;
+}
+function hideAllOverlays() {
+  for (const api of [ordersGridApi, invoicesGridApi, inventoryGridApi, pricesGridApi, payablesGridApi, forecastGridApi, wasteGridApi, subsGridApi, webhookGridApi, groupsGridApi]) {
+    if (api) api.hideOverlay();
+  }
+}
+
 let ordersGridApi;
 let invoicesGridApi;
 let inventoryGridApi;
@@ -117,6 +146,18 @@ function renderStats(orders) {
     <div class="stat"><strong>${prevented}</strong><span>${prevented === 1 ? 'stock-out prevented' : 'stock-outs prevented'}</span></div>`;
 }
 
+async function loadRoi() {
+  const { data } = await api('/api/roi');
+  const r = data || {};
+  document.getElementById('roiPanel').innerHTML = `
+    <div class="stat"><strong>${money(r.weeklySaving || 0)}</strong><span>saved per week (avg per captured box)</span></div>
+    <div class="stat"><strong>${money(r.yearlySavingPerCafe || 0)}</strong><span>saved per year, per café</span></div>
+    <div class="stat"><strong>${money(r.groupSavingPerOrder || 0)}</strong><span>saved per pooled group order</span></div>
+    <div class="stat"><strong>${r.stockoutsPrevented || 0}</strong><span>${(r.stockoutsPrevented || 0) === 1 ? 'stock-out prevented' : 'stock-outs prevented'}</span></div>
+    <div class="stat"><strong>${money(r.totalSaved || 0)}</strong><span>total saved so far</span></div>`;
+  return r;
+}
+
 async function loadInventory() {
   const { data } = await api('/api/inventory');
   const rows = Array.isArray(data) ? data : [];
@@ -221,6 +262,8 @@ async function loadAll() {
   await loadSubscriptions();
   await loadWebhookEvents();
   await loadGroups();
+  await loadRoi();
+  hideAllOverlays();
 }
 
 document.getElementById('adjustForm').addEventListener('submit', async (e) => {
@@ -329,16 +372,18 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
   const ordersOptions = {
     columnDefs: [
       { field: 'id', headerName: 'Order id', filter: true, flex: 2 },
-      { field: 'status', filter: true, flex: 1 },
+      { field: 'status', filter: true, flex: 1, cellRenderer: pillCell },
       { field: 'total', headerName: 'Total (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
       { field: 'items', headerName: 'Items', filter: true, flex: 3 },
       { field: 'expectedDelivery', headerName: 'Expected delivery', filter: true, flex: 1 },
       { field: 'createdAt', headerName: 'Created', filter: true, flex: 1 },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  ordersGridApi = agGrid.createGrid(document.getElementById('ordersGrid'), ordersOptions);
+ordersGridApi = agGrid.createGrid(document.getElementById('ordersGrid'), ordersOptions);
+  ordersGridApi.showLoadingOverlay();
 
   const pricesOptions = {
     columnDefs: [
@@ -352,9 +397,11 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'best', headerName: 'Best buy', filter: true, flex: 2 },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  pricesGridApi = agGrid.createGrid(document.getElementById('pricesGrid'), pricesOptions);
+pricesGridApi = agGrid.createGrid(document.getElementById('pricesGrid'), pricesOptions);
+  pricesGridApi.showLoadingOverlay();
 
   const inventoryOptions = {
     columnDefs: [
@@ -363,16 +410,18 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'stock', headerName: 'Stock', filter: 'agNumberColumnFilter', flex: 1 },
       { field: 'dailyUse', headerName: 'Use / day', filter: 'agNumberColumnFilter', flex: 1 },
       { field: 'daysLeft', headerName: 'Days left', filter: 'agNumberColumnFilter', flex: 1 },
-      { field: 'status', filter: true, flex: 1 },
+      { field: 'status', filter: true, flex: 1, cellRenderer: pillCell },
       { field: 'reorderPoint', headerName: 'Reorder at', filter: 'agNumberColumnFilter', flex: 1 },
       { field: 'leadTimeDays', headerName: 'Lead (days)', filter: 'agNumberColumnFilter', flex: 1 },
       { field: 'maxStock', headerName: 'Max stock', filter: 'agNumberColumnFilter', flex: 1, valueFormatter: (p) => p.value == null ? '—' : p.value },
       { field: 'excess', headerName: 'Excess', filter: 'agNumberColumnFilter', flex: 1 },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  inventoryGridApi = agGrid.createGrid(document.getElementById('inventoryGrid'), inventoryOptions);
+inventoryGridApi = agGrid.createGrid(document.getElementById('inventoryGrid'), inventoryOptions);
+  inventoryGridApi.showLoadingOverlay();
 
   const wasteOptions = {
     columnDefs: [
@@ -382,24 +431,28 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'wastedAt', headerName: 'Date', filter: true, flex: 1 },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  wasteGridApi = agGrid.createGrid(document.getElementById('wasteGrid'), wasteOptions);
+wasteGridApi = agGrid.createGrid(document.getElementById('wasteGrid'), wasteOptions);
+  wasteGridApi.showLoadingOverlay();
 
   const forecastOptions = {
     columnDefs: [
       { field: 'name', headerName: 'Product', filter: true, flex: 2 },
       { field: 'stock', headerName: 'Stock', filter: 'agNumberColumnFilter', flex: 1 },
       { field: 'daysLeft', headerName: 'Days left', filter: 'agNumberColumnFilter', flex: 1 },
-      { field: 'status', filter: true, flex: 1 },
+      { field: 'status', filter: true, flex: 1, cellRenderer: pillCell },
       { field: 'stockoutDate', headerName: 'Runs out ~', filter: true, flex: 1 },
       { field: 'orderByDate', headerName: 'Order by', filter: true, flex: 1 },
-      { field: 'orderNow', headerName: 'Order now?', filter: true, flex: 1 },
+      { field: 'orderNow', headerName: 'Order now?', filter: true, flex: 1, cellRenderer: flagCell },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  forecastGridApi = agGrid.createGrid(document.getElementById('forecastGrid'), forecastOptions);
+forecastGridApi = agGrid.createGrid(document.getElementById('forecastGrid'), forecastOptions);
+  forecastGridApi.showLoadingOverlay();
 
   const payablesOptions = {
     columnDefs: [
@@ -410,25 +463,27 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'amount', headerName: 'Amount (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
       { field: 'terms', filter: true, flex: 1 },
       { field: 'dueDate', headerName: 'Due', filter: true, flex: 1 },
-      { field: 'status', filter: true, flex: 1 },
-      { field: 'overdue', headerName: 'Overdue?', filter: true, flex: 1 },
+      { field: 'status', filter: true, flex: 1, cellRenderer: pillCell },
+      { field: 'overdue', headerName: 'Overdue?', filter: true, flex: 1, cellRenderer: flagCell },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  payablesGridApi = agGrid.createGrid(document.getElementById('payablesGrid'), payablesOptions);
+payablesGridApi = agGrid.createGrid(document.getElementById('payablesGrid'), payablesOptions);
+  payablesGridApi.showLoadingOverlay();
 
   const invoicesOptions = {
     columnDefs: [
       { field: 'invoiceId', headerName: 'Invoice id', filter: true, flex: 2 },
       { field: 'orderId', headerName: 'Order id', filter: true, flex: 2 },
-      { field: 'status', filter: true, flex: 1 },
+      { field: 'status', filter: true, flex: 1, cellRenderer: pillCell },
       { field: 'recipient', filter: true, flex: 2 },
       { field: 'total', headerName: 'Total (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1 },
       { field: 'dueDate', headerName: 'Due', filter: true, flex: 1 },
-      { field: 'overdue', headerName: 'Overdue?', filter: true, flex: 1 },
+      { field: 'overdue', headerName: 'Overdue?', filter: true, flex: 1, cellRenderer: flagCell },
       { field: 'lastReminded', headerName: 'Last reminded', filter: true, flex: 1 },
-      { field: 'followUp', headerName: 'Follow up?', filter: true, flex: 1 },
+      { field: 'followUp', headerName: 'Follow up?', filter: true, flex: 1, cellRenderer: flagCell },
       {
         headerName: 'Actions', flex: 1,
         cellRenderer: (p) => (p.data.status === 'SENT'
@@ -437,14 +492,16 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  invoicesGridApi = agGrid.createGrid(document.getElementById('invoicesGrid'), invoicesOptions);
+invoicesGridApi = agGrid.createGrid(document.getElementById('invoicesGrid'), invoicesOptions);
+  invoicesGridApi.showLoadingOverlay();
 
   const subsOptions = {
     columnDefs: [
       { field: 'id', headerName: 'Subscription id', filter: true, flex: 2, minWidth: 180 },
-      { field: 'status', filter: true, flex: 1, minWidth: 200 },
+      { field: 'status', filter: true, flex: 1, minWidth: 200, cellRenderer: pillCell },
       { field: 'amount', headerName: 'Per week (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
       { field: 'box', headerName: 'Box contents', filter: true, flex: 3, minWidth: 260, wrapText: true, autoHeight: true },
       { field: 'nextBilling', headerName: 'Next billing', filter: true, flex: 1, minWidth: 130 },
@@ -463,22 +520,26 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  subsGridApi = agGrid.createGrid(document.getElementById('subsGrid'), subsOptions);
+subsGridApi = agGrid.createGrid(document.getElementById('subsGrid'), subsOptions);
+  subsGridApi.showLoadingOverlay();
 
   const webhookOptions = {
     columnDefs: [
       { field: 'eventType', headerName: 'Event', filter: true, flex: 2, minWidth: 240 },
       { field: 'resourceId', headerName: 'Resource id', filter: true, flex: 2, minWidth: 190 },
       { field: 'receivedAt', headerName: 'Received', filter: true, flex: 1, minWidth: 150 },
-      { field: 'handled', filter: true, flex: 1, minWidth: 90 },
+      { field: 'handled', filter: true, flex: 1, minWidth: 90, cellRenderer: pillCell },
       { field: 'summary', filter: true, flex: 3, minWidth: 300, wrapText: true, autoHeight: true },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  webhookGridApi = agGrid.createGrid(document.getElementById('webhookGrid'), webhookOptions);
+webhookGridApi = agGrid.createGrid(document.getElementById('webhookGrid'), webhookOptions);
+  webhookGridApi.showLoadingOverlay();
 
   const groupsOptions = {
     columnDefs: [
@@ -491,13 +552,15 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 140 },
       { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 140 },
       { field: 'members', headerName: 'Members', filter: true, flex: 3, minWidth: 150, wrapText: true, autoHeight: true },
-      { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1, minWidth: 90 },
+      { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1, minWidth: 90, cellRenderer: pillCell },
       { field: 'action', headerName: '', flex: 2, minWidth: 130, cellRenderer: (p) => p.value || '' },
     ],
     defaultColDef: { sortable: true, resizable: true },
+    overlayLoadingTemplate: LOADING_TEMPLATE,
     rowData: [],
   };
-  groupsGridApi = agGrid.createGrid(document.getElementById('groupsGrid'), groupsOptions);
+groupsGridApi = agGrid.createGrid(document.getElementById('groupsGrid'), groupsOptions);
+  groupsGridApi.showLoadingOverlay();
 
   document.getElementById('groupsGrid').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-group-order]');

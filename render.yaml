@@ -1,8 +1,14 @@
 # Deploy AgentMart to Render (free tier) — one click from the repo.
 # Set the sync:false values in the Render dashboard after deploy:
 # PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET from a PayPal sandbox app,
-# LLM_API_KEY from Baseten and LLM_FALLBACK_API_KEY from Fireworks
+# LLM_API_KEY from Fireworks and LLM_FALLBACK_API_KEY from Fireworks
 # (optional — deterministic fallback if both are empty).
+# v12: the code default primary is Fireworks now (the Baseten model version
+# was deactivated 2026-11-07). LLM_API_KEY in the dashboard must hold the
+# Fireworks key — if it still holds the old Baseten key, the primary fails
+# over to the fallback on every message. LLM_FALLBACK2_* is for a second
+# fallback tier (intended for a Modal endpoint): set all three in the
+# dashboard when that key exists, otherwise leave them unset.
 services:
   - type: web
     name: agentmart
@@ -17,9 +23,9 @@ services:
       - key: PAYPAL_ENV
         value: sandbox
       - key: LLM_BASE_URL
-        value: https://inference.baseten.co/v1
+        value: https://api.fireworks.ai/inference/v1
       - key: LLM_MODEL
-        value: meta-models/muse-spark-open-1026
+        value: accounts/fireworks/models/muse-spark-open
       - key: LLM_FALLBACK_BASE_URL
         value: https://api.fireworks.ai/inference/v1
       - key: LLM_FALLBACK_MODEL
@@ -31,4 +37,10 @@ services:
       - key: LLM_API_KEY
         sync: false
       - key: LLM_FALLBACK_API_KEY
+        sync: false
+      - key: LLM_FALLBACK2_API_KEY
+        sync: false
+      - key: LLM_FALLBACK2_BASE_URL
+        sync: false
+      - key: LLM_FALLBACK2_MODEL
         sync: false
