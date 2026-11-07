@@ -862,6 +862,10 @@ async function createPayPalOrder(session) {
       },
       items: view.items.map((i) => ({
         name: i.name.slice(0, 127),
+        // The supplier is not stored anywhere on PayPal by default, so
+        // write it into the item description — the rehydrate reads it
+        // back to keep the payable on the right supplier.
+        ...(i.supplier ? { description: `Supplied by ${i.supplier}`.slice(0, 127) } : {}),
         unit_amount: { currency_code: 'USD', value: i.price.toFixed(2) },
         // PayPal requires whole-unit quantities; round defensively so a
         // fractional quantity persisted in an old cart can never break checkout.
@@ -1317,12 +1321,43 @@ function paypalOrderToLocal(live) {
     const p = PRODUCTS.find((x) => x.name === it.name);
     const price = Number(it.unit_amount?.value || 0);
     const qty = Math.max(1, Math.round(Number(it.quantity || 1)));
-    return p
-      ? { id: p.id, name: p.name, emoji: p.emoji, price, qty, supplier: p.supplier, leadTimeDays: p.leadTimeDays }
-      : { name: it.name, price, qty };
+    if (!p) return { name: it.name, price, qty };
+    // Supplier fidelity: PayPal does not store the supplier, so resolve
+    // it (1) from the description written at order time ("Supplied by
+    // X"), (2) by price — the alt supplier's price differs from the main
+    // price, so a paid price equal to the alt price identifies the alt
+    // supplier (this recovers pre-fix orders like the v5 chain),
+    // (3) fall back to the catalog main supplier.
+    let supplier = p.supplier;
+    let leadTimeDays = p.leadTimeDays;
+    const alt = p.altSupplier || null;
+    const known = (name) => {
+      if (name === p.supplier) return { name: p.supplier, leadTimeDays: p.leadTimeDays };
+      if (alt && name === alt.name) return { name: alt.name, leadTimeDays: alt.leadTimeDays };
+      return null;
+    };
+    const described = (it.description || '').match(/Supplied by (.+?)\s*$/);
+    const fromDesc = described && known(described[1].trim());
+    if (fromDesc) { supplier = fromDesc.name; leadTimeDays = fromDesc.leadTimeDays; }
+    else if (alt && alt.price !== p.price && price === alt.price) { supplier = alt.name; leadTimeDays = alt.leadTimeDays; }
+    return { id: p.id, name: p.name, emoji: p.emoji, price, qty, supplier, leadTimeDays };
   });
   const total = Number(pu.amount?.value || items.reduce((s, i) => s + i.price * i.qty, 0));
   const statusMap = { APPROVED: 'CREATED', COMPLETED: 'COMPLETED' };
+  // Savings are not stored on PayPal — recompute them the same way order
+  // creation does: main catalog price minus the price actually paid.
+  const saved = Math.round(items.reduce((s, i) => {
+    const p = PRODUCTS.find((x) => x.name === i.name);
+    return s + (p ? Math.max(0, p.price - i.price) * i.qty : 0);
+  }, 0) * 100) / 100;
+  // Stock-outs prevented, same heuristic as at order time: an item that
+  // was LOW/OUT when ordered. Seed stock equals pre-delivery stock
+  // (rehydrate never re-applies a delivery), so the current status
+  // reproduces the order-time status for a rehydrated order.
+  const preventedStockouts = items.filter((i) => {
+    const p = PRODUCTS.find((x) => x.name === i.name);
+    return p && (stockStatus(p) === 'LOW' || stockStatus(p) === 'OUT');
+  }).length;
   return {
     sessionId: 'rehydrated',
     items,
@@ -1330,8 +1365,8 @@ function paypalOrderToLocal(live) {
     status: statusMap[live.status] || live.status || 'CREATED',
     createdAt: live.create_time || new Date().toISOString(),
     expectedDelivery: expectedDeliveryDate(items.filter((i) => i.leadTimeDays)),
-    saved: 0,
-    preventedStockouts: 0,
+    saved,
+    preventedStockouts,
   };
 }
 
@@ -1347,7 +1382,20 @@ async function rehydrateOrder(orderId) {
   // (INSERT OR IGNORE, so a second sweep is a no-op). Stock is NOT
   // re-applied — the delivery already happened before the DB wipe, and
   // re-adding it on top of seed stock would double-count.
-  if (rec.status === 'COMPLETED') createPayablesForOrder(orderId);
+  if (rec.status === 'COMPLETED') {
+    createPayablesForOrder(orderId);
+    // The supplier mapping improved since the first rehydrate: drop UNPAID
+    // payables for this order whose supplier is no longer in the
+    // recomputed set (e.g. the v5 oat-milk payable first landed on the
+    // main supplier). A PAID payable is history — never delete it.
+    const keep = new Set(payablesForOrder(rec, orderId).map((r) => r.id));
+    for (const [pid, row] of [...payables.entries()]) {
+      if (row.orderId === orderId && row.status !== 'PAID' && !keep.has(pid)) {
+        payables.delete(pid);
+        db.prepare('DELETE FROM payables WHERE id=?').run(pid);
+      }
+    }
+  }
   return rec;
 }
 

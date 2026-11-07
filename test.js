@@ -950,6 +950,126 @@ test('v12 boot rehydrate re-creates a completed order and its payables', async (
   }
 });
 
+test('rehydrate recovers the real supplier from the PayPal item description', async () => {
+  const origFetch = globalThis.fetch;
+  const orderJson = { id: 'ORDER-TEST-2', status: 'COMPLETED', create_time: '2026-11-07T07:00:00Z', purchase_units: [{ amount: { value: '58.47' }, items: [
+    { name: 'Blue Bottle Craft Matcha · 100 g', unit_amount: { value: '40.50' }, quantity: '1' },
+    { name: 'Oatly Barista Oat Milk · 32 oz', description: 'Supplied by Green Valley Farms', unit_amount: { value: '5.99' }, quantity: '3' },
+  ] }] };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders/ORDER-TEST-2')) return { ok: true, json: async () => orderJson };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-2' } },
+    ]);
+    assert.equal(summary.orders, 1);
+    const rec = orders.get('ORDER-TEST-2');
+    assert.ok(rec);
+    const oat = rec.items.find((i) => i.id === 'oat-milk');
+    assert.equal(oat.supplier, 'Green Valley Farms');
+    assert.equal(oat.leadTimeDays, 3);
+    assert.equal(rec.saved, 1.20);
+    assert.equal(rec.preventedStockouts, 1);
+    assert.ok(payables.has('pay-ORDER-TEST-2-green-valley-farms'));
+    assert.equal(payables.get('pay-ORDER-TEST-2-green-valley-farms').amount, 17.97);
+    assert.ok(!payables.has('pay-ORDER-TEST-2-dairy-pantry-co-'));
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-2');
+    payables.delete('pay-ORDER-TEST-2-kyoto-tea-imports');
+    payables.delete('pay-ORDER-TEST-2-green-valley-farms');
+  }
+});
+
+test('rehydrate recovers the alt supplier by price when no description exists', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders/ORDER-TEST-3')) return { ok: true, json: async () => ({ id: 'ORDER-TEST-3', status: 'COMPLETED', create_time: '2026-11-07T07:00:00Z', purchase_units: [{ amount: { value: '58.47' }, items: [
+      { name: 'Blue Bottle Craft Matcha · 100 g', unit_amount: { value: '40.50' }, quantity: '1' },
+      { name: 'Oatly Barista Oat Milk · 32 oz', unit_amount: { value: '5.99' }, quantity: '3' },
+    ] }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-3' } },
+    ]);
+    assert.equal(summary.orders, 1);
+    const rec = orders.get('ORDER-TEST-3');
+    assert.equal(rec.items.find((i) => i.id === 'oat-milk').supplier, 'Green Valley Farms');
+    assert.equal(rec.saved, 1.20);
+    assert.ok(payables.has('pay-ORDER-TEST-3-green-valley-farms'));
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-3');
+    payables.delete('pay-ORDER-TEST-3-kyoto-tea-imports');
+    payables.delete('pay-ORDER-TEST-3-green-valley-farms');
+  }
+});
+
+test('rehydrate drops a stale UNPAID payable but keeps a PAID one', async () => {
+  const origFetch = globalThis.fetch;
+  // Simulate the first (buggy) rehydrate: oat-milk payable landed on the
+  // main supplier, plus an old PAID row that must survive as history.
+  payables.set('pay-ORDER-TEST-4-dairy-pantry-co-', { orderId: 'ORDER-TEST-4', supplier: 'Dairy & Pantry Co.', amount: 17.97, dueDate: '2026-11-18', terms: 'Net 7', status: 'UNPAID' });
+  payables.set('pay-ORDER-TEST-4-old-supplier', { orderId: 'ORDER-TEST-4', supplier: 'Old Supplier', amount: 5, dueDate: '2026-11-18', terms: 'Net 7', status: 'PAID' });
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders/ORDER-TEST-4')) return { ok: true, json: async () => ({ id: 'ORDER-TEST-4', status: 'COMPLETED', create_time: '2026-11-07T07:00:00Z', purchase_units: [{ amount: { value: '58.47' }, items: [
+      { name: 'Blue Bottle Craft Matcha · 100 g', unit_amount: { value: '40.50' }, quantity: '1' },
+      { name: 'Oatly Barista Oat Milk · 32 oz', description: 'Supplied by Green Valley Farms', unit_amount: { value: '5.99' }, quantity: '3' },
+    ] }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-4' } },
+    ]);
+    assert.equal(summary.orders, 1);
+    assert.ok(!payables.has('pay-ORDER-TEST-4-dairy-pantry-co-'), 'stale UNPAID payable is removed');
+    assert.ok(payables.has('pay-ORDER-TEST-4-green-valley-farms'));
+    assert.ok(payables.has('pay-ORDER-TEST-4-old-supplier'), 'PAID history is never deleted');
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-4');
+    payables.delete('pay-ORDER-TEST-4-kyoto-tea-imports');
+    payables.delete('pay-ORDER-TEST-4-green-valley-farms');
+    payables.delete('pay-ORDER-TEST-4-old-supplier');
+  }
+});
+
+test('rehydrate keeps the main supplier for a group-tier price and counts the tier saving', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/v1/oauth2/token')) return { ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600 }) };
+    if (u.includes('/v2/checkout/orders/ORDER-TEST-5')) return { ok: true, json: async () => ({ id: 'ORDER-TEST-5', status: 'COMPLETED', create_time: '2026-11-07T07:00:00Z', purchase_units: [{ amount: { value: '36.45' }, items: [
+      { name: 'Blue Bottle Craft Matcha · 100 g', unit_amount: { value: '36.45' }, quantity: '1' },
+    ] }] }) };
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  try {
+    const summary = await rehydrateFromEvents([
+      { event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: 'ORDER-TEST-5' } },
+    ]);
+    assert.equal(summary.orders, 1);
+    const rec = orders.get('ORDER-TEST-5');
+    assert.equal(rec.items[0].supplier, 'Kyoto Tea Imports');
+    assert.equal(rec.saved, 4.05);
+  } finally {
+    globalThis.fetch = origFetch;
+    orders.delete('ORDER-TEST-5');
+    payables.delete('pay-ORDER-TEST-5-kyoto-tea-imports');
+  }
+});
+
 test('v12 boot rehydrate re-creates an invoice from a PayPal event', async () => {
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
