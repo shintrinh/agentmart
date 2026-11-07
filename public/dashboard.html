@@ -74,7 +74,7 @@
     <p class="muted">Created when an order is captured, split per supplier. Due date = expected delivery + payment terms (COD = on delivery). Payables only exist for captured orders — an order awaiting approval is not money owed yet.</p>
     <p id="payablesSummary" class="muted"></p>
     <form id="payPayableForm" class="invoice-form">
-      <input id="payPayableId" type="text" placeholder="Payable id, e.g. pay-19T958561E596930N-kyoto-tea-imports" required />
+      <input id="payPayableId" type="text" placeholder="Payable id, e.g. pay-XXXXXXXX-kyoto-tea-imports" required />
       <button type="submit">Mark as paid</button>
     </form>
     <p id="payPayableMsg" class="checkout-msg"></p>
@@ -154,7 +154,7 @@
     <p class="muted">Create a PayPal invoice from a completed order, then send it to the customer. Invoices are created with the PayPal Invoicing API v2 (sandbox) on NET_30 terms — due date is 30 days after creation. A SENT invoice past its due date shows as overdue; use <strong>Send reminder</strong> (or ask the agent) to send a PayPal payment reminder.</p>
     <div id="overdueAlert"></div>
     <form id="invoiceForm" class="invoice-form">
-      <input id="invoiceOrderId" type="text" placeholder="PayPal order id, e.g. 19T958561E596930N" required />
+      <input id="invoiceOrderId" type="text" placeholder="PayPal order id" required />
       <input id="invoiceEmail" type="email" placeholder="Customer email" required />
       <button type="submit">Create invoice (draft)</button>
     </form>

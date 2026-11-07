@@ -114,7 +114,7 @@ function renderStats(orders) {
     <div class="stat"><strong>${orders.filter((o) => o.status === 'CREATED').length}</strong><span>awaiting approval</span></div>
     <div class="stat"><strong>${topItem ? topItem[0].split('·')[0].trim() : '—'}</strong><span>top item by spend${topItem ? ` (${money(topItem[1])})` : ''}</span></div>
     <div class="stat"><strong>${money(saved)}</strong><span>saved by cheaper suppliers</span></div>
-    <div class="stat"><strong>${prevented}</strong><span>stock-outs prevented</span></div>`;
+    <div class="stat"><strong>${prevented}</strong><span>${prevented === 1 ? 'stock-out prevented' : 'stock-outs prevented'}</span></div>`;
 }
 
 async function loadInventory() {
@@ -444,7 +444,7 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
   const subsOptions = {
     columnDefs: [
       { field: 'id', headerName: 'Subscription id', filter: true, flex: 2, minWidth: 180 },
-      { field: 'status', filter: true, flex: 1, minWidth: 160 },
+      { field: 'status', filter: true, flex: 1, minWidth: 200 },
       { field: 'amount', headerName: 'Per week (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
       { field: 'box', headerName: 'Box contents', filter: true, flex: 3, minWidth: 260, wrapText: true, autoHeight: true },
       { field: 'nextBilling', headerName: 'Next billing', filter: true, flex: 1, minWidth: 130 },
@@ -487,9 +487,9 @@ document.getElementById('invoiceForm').addEventListener('submit', async (e) => {
       { field: 'itemName', headerName: 'Item', filter: true, flex: 2, minWidth: 150 },
       { field: 'pooledQty', headerName: 'Pooled qty', filter: 'agNumberColumnFilter', flex: 1, minWidth: 90 },
       { field: 'tier', headerName: 'Tier', filter: true, flex: 1, minWidth: 110 },
-      { field: 'unitPrice', headerName: 'Group price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
-      { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
-      { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 110 },
+      { field: 'unitPrice', headerName: 'Group price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 140 },
+      { field: 'soloPrice', headerName: 'Solo price (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 140 },
+      { field: 'savings', headerName: 'Saving (USD)', filter: 'agNumberColumnFilter', valueFormatter: (p) => money(p.value), flex: 1, minWidth: 140 },
       { field: 'members', headerName: 'Members', filter: true, flex: 3, minWidth: 150, wrapText: true, autoHeight: true },
       { field: 'orderStatus', headerName: 'Order', filter: true, flex: 1, minWidth: 90 },
       { field: 'action', headerName: '', flex: 2, minWidth: 130, cellRenderer: (p) => p.value || '' },

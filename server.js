@@ -1180,6 +1180,10 @@ function routeWebhookEvent(event) {
   if (type === 'PAYMENT.SALE.COMPLETED') {
     return { kind: 'sale', saleId: res.id, subscriptionId: res.billing_agreement_id || null, summary: `Sale ${res.id} completed${res.billing_agreement_id ? ` (subscription ${res.billing_agreement_id})` : ''}` };
   }
+  if (type.startsWith('PAYMENT.CAPTURE.')) {
+    const byType = { 'PAYMENT.CAPTURE.COMPLETED': 'completed', 'PAYMENT.CAPTURE.REFUNDED': 'refunded', 'PAYMENT.CAPTURE.DENIED': 'denied' };
+    return { kind: 'capture', captureId: res.id, summary: `Capture ${res.id} ${byType[type] || type}` };
+  }
   return { kind: 'unknown', summary: `Unhandled event ${type}` };
 }
 
@@ -1280,6 +1284,8 @@ async function handleWebhookEvent(event) {
       }
     } else if (action.kind === 'sale') {
       handled = true; // logged; the subscription/order handlers own the state
+    } else if (action.kind === 'capture') {
+      handled = true; // logged; the order handlers own the state
     }
   } catch (e) {
     console.error('webhook handler failed:', e.message);

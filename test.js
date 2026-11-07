@@ -539,6 +539,7 @@ test('routeWebhookEvent maps every PayPal event type', () => {
   assert.equal(routeWebhookEvent({ event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: '9SH1' } }).kind, 'order-approved');
   assert.equal(routeWebhookEvent({ event_type: 'CHECKOUT.ORDER.COMPLETED', resource: { id: '9SH1' } }).kind, 'order-completed');
   assert.equal(routeWebhookEvent({ event_type: 'PAYMENT.SALE.COMPLETED', resource: { id: 'S-1', billing_agreement_id: 'I-X' } }).subscriptionId, 'I-X');
+  assert.deepEqual(routeWebhookEvent({ event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'C-1' } }), { kind: 'capture', captureId: 'C-1', summary: 'Capture C-1 completed' });
   assert.equal(routeWebhookEvent({ event_type: 'SOMETHING.ELSE', resource: {} }).kind, 'unknown');
 });
 
